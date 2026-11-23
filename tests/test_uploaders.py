@@ -5,7 +5,7 @@ import pytest
 from mirror.errors import UploadError
 from mirror.uploaders.base import UploadResult
 from mirror.uploaders.gofile import GofileUploader
-from mirror.uploaders.pixeldrain import PixeldrainUploader
+from mirror.uploaders.pixeldrain import PixeldrainUploader, _ProgressReader
 from mirror.utils import CancelToken
 
 
@@ -55,6 +55,30 @@ class FakeSession:
             if not chunk:
                 break
         return self.response
+
+
+def test_pixeldrain_progress_includes_upload_speed():
+    import io
+
+    updates: list[tuple[float, str]] = []
+    reader = _ProgressReader(
+        io.BytesIO(b"abcdefgh"),
+        8,
+        lambda percent, detail: updates.append((percent, detail)),
+        CancelToken(),
+    )
+    now = [0.0]
+    reader._meter._clock = lambda: now[0]
+    reader._last_emit = -100.0
+
+    reader.read(4)
+    now[0] = 1.0
+    reader.read(4)
+
+    percent, detail = updates[-1]
+    assert percent == 100.0
+    assert detail.startswith("8 B / 8 B")
+    assert "B/s" in detail
 
 
 def test_gofile_guest_upload(tmp_path):

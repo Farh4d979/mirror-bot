@@ -11,7 +11,7 @@ from urllib.parse import quote
 import requests
 
 from ..errors import JobCancelled, UploadError
-from ..utils import CancelToken, human_size
+from ..utils import CancelToken, format_progress, SpeedMeter
 from .base import ProgressCB, Uploader, UploadResult
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,9 @@ class _Retryable(Exception):
 class _ProgressReader:
     """File wrapper that reports upload progress to requests/urllib3."""
 
+    # Balance responsiveness against the cost of formatting every chunk.
+    EMIT_INTERVAL = 0.25
+
     def __init__(
         self,
         handle,
@@ -39,17 +42,23 @@ class _ProgressReader:
         self.progress = progress
         self.cancel = cancel
         self.done = 0
+        self._meter = SpeedMeter()
+        self._last_emit = 0.0
 
     def read(self, size: int = -1) -> bytes:
         self.cancel.check()
         chunk = self.handle.read(size)
         if chunk:
             self.done += len(chunk)
-            percent = self.done / self.total * 100 if self.total else None
-            self.progress(
-                percent,
-                f"{human_size(self.done)} / {human_size(self.total)}",
-            )
+            now = time.monotonic()
+            if self.done >= self.total or now - self._last_emit >= self.EMIT_INTERVAL:
+                self._last_emit = now
+                speed, eta = self._meter.update(self.done, self.total)
+                percent = self.done / self.total * 100 if self.total else None
+                self.progress(
+                    percent,
+                    format_progress(self.done, self.total, speed, eta),
+                )
         return chunk
 
     def __len__(self) -> int:
@@ -206,6 +215,7 @@ class PixeldrainUploader(Uploader):
             )
 
         link = f"https://pixeldrain.com/u/{file_id}"
+        progress(100.0, format_progress(total, total))
         logger.info("Pixeldrain upload complete: %s", link)
         return UploadResult(url=link, host="Pixeldrain")
 

@@ -9,9 +9,10 @@ import socket
 import threading
 import time
 import unicodedata
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import unquote, urlparse, urlunparse
 
 from .errors import InvalidUrl, JobCancelled, JobTimeout
@@ -83,6 +84,79 @@ def human_eta(seconds: Optional[float]) -> str:
         return f"{minutes}m {seconds:02d}s"
     hours, minutes = divmod(minutes, 60)
     return f"{hours}h {minutes:02d}m"
+
+
+def format_progress(
+    done: Optional[int],
+    total: Optional[int],
+    speed: Optional[float] = None,
+    eta: Optional[float] = None,
+) -> str:
+    """Build a compact progress line: sizes, speed and ETA."""
+    parts: list[str] = []
+    if done is not None:
+        if total:
+            parts.append(f"{human_size(done)} / {human_size(total)}")
+        else:
+            parts.append(human_size(done))
+    speed_text = human_speed(speed)
+    if speed_text:
+        parts.append(speed_text)
+    eta_text = human_eta(eta)
+    if eta_text:
+        parts.append(f"ETA {eta_text}")
+    return " · ".join(parts)
+
+
+class SpeedMeter:
+    """Windowed transfer-rate estimator shared by downloads and uploads.
+
+    Samples are kept for a short window so the displayed rate reacts quickly
+    without jittering on every chunk.
+    """
+
+    def __init__(
+        self,
+        window: float = 5.0,
+        min_span: float = 0.4,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.window = max(1.0, float(window))
+        self.min_span = max(0.0, float(min_span))
+        self._clock = clock
+        self._samples: deque[tuple[float, int]] = deque()
+
+    def reset(self) -> None:
+        self._samples.clear()
+
+    def update(
+        self, done: int, total: Optional[int] = None
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Record progress and return ``(bytes_per_second, eta_seconds)``."""
+        now = self._clock()
+        done = max(0, int(done))
+        if self._samples and now < self._samples[-1][0]:
+            self._samples.clear()
+        self._samples.append((now, done))
+
+        cutoff = now - self.window
+        while len(self._samples) > 2 and self._samples[0][0] < cutoff:
+            self._samples.popleft()
+
+        if len(self._samples) < 2:
+            return None, None
+
+        first_time, first_done = self._samples[0]
+        span = now - first_time
+        moved = done - first_done
+        if span < self.min_span or moved <= 0:
+            return None, None
+
+        speed = moved / span
+        eta = None
+        if total and total > done and speed > 0:
+            eta = (total - done) / speed
+        return speed, eta
 
 
 def progress_bar(percent: Optional[float], width: int = 12) -> str:

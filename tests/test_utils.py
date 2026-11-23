@@ -10,10 +10,12 @@ from mirror.utils import (
     exceeds_limit,
     extract_url,
     filename_from_headers,
+    format_progress,
     human_size,
     parse_size,
     progress_bar,
     sanitize_filename,
+    SpeedMeter,
     validate_http_url,
 )
 
@@ -82,6 +84,28 @@ def test_progress_bar():
     assert progress_bar(0, 10) == "░" * 10
     assert progress_bar(100, 10) == "█" * 10
     assert progress_bar(None, 4) == "░" * 4
+
+
+def test_format_progress():
+    assert format_progress(1024, 2048, 512, 2) == "1.0 KB / 2.0 KB · 512 B/s · ETA 2s"
+    assert format_progress(1024, None) == "1.0 KB"
+    assert format_progress(0, 0) == "0 B"
+
+
+def test_speed_meter_rate_and_eta():
+    now = [0.0]
+    meter = SpeedMeter(min_span=0, clock=lambda: now[0])
+    assert meter.update(0, 100) == (None, None)
+
+    now[0] = 1.0
+    speed, eta = meter.update(50, 100)
+    assert speed == pytest.approx(50.0)
+    assert eta == pytest.approx(1.0)
+
+    now[0] = 2.0
+    speed, eta = meter.update(100, 100)
+    assert speed == pytest.approx(50.0)
+    assert eta is None
 
 
 def test_cancel_token():

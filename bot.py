@@ -39,6 +39,7 @@ from mirror.state import load_state, save_state
 from mirror.uploaders import get_uploader
 from mirror.utils import (
     extract_url,
+    human_eta,
     human_size,
     progress_bar,
     sanitize_filename,
@@ -130,28 +131,41 @@ def _cancel_keyboard(job_id: str) -> InlineKeyboardMarkup:
     )
 
 
+STAGE_STYLES = {
+    "queued": ("🕒", "Queued"),
+    "resolving": ("🔎", "Resolving link"),
+    "downloading": ("⬇️", "Downloading"),
+    "uploading": ("⬆️", "Uploading"),
+    "done": ("✅", "Done"),
+    "failed": ("❌", "Failed"),
+    "cancelled": ("⏹️", "Cancelled"),
+}
+
+
 def render_job(job: Job) -> str:
     snap = job.snapshot()
-    titles = {
-        "queued": "Queued",
-        "resolving": "Resolving link",
-        "downloading": "Downloading",
-        "uploading": "Uploading",
-        "done": "Done",
-        "failed": "Failed",
-        "cancelled": "Cancelled",
-    }
-    lines = [f"<b>{titles.get(snap['stage'], snap['stage'].title())}</b> · <code>{snap['id']}</code>"]
+    icon, title = STAGE_STYLES.get(snap["stage"], ("⚙️", snap["stage"].title()))
+    lines = [f"{icon} <b>{title}</b> · <code>{snap['id']}</code>"]
 
     if snap["status"] == "queued":
-        lines.append("Waiting for a free worker…")
-    if snap["percent"] is not None:
-        lines.append(f"<code>{progress_bar(snap['percent'])}</code> {snap['percent']:.0f}%")
+        lines.append("<i>Waiting for a free worker…</i>")
+
+    percent = snap["percent"]
+    if percent is not None:
+        lines.append(f"<code>{progress_bar(percent, width=16)}</code> <b>{percent:.0f}%</b>")
+
     if snap["detail"]:
-        lines.append(html.escape(str(snap["detail"])))
+        lines.append(f"<i>{html.escape(str(snap['detail']))}</i>")
+
     if snap["extras"]:
-        lines.append(f"<i>{snap['extras']} extra file(s) will be skipped (largest is uploaded).</i>")
-    lines.append(f"<b>Host:</b> {snap['host'].title()}")
+        lines.append(f"<i>➕ {snap['extras']} extra file(s) skipped — largest is uploaded.</i>")
+
+    footer = [f"📦 {snap['host'].title()}"]
+    if snap["file_size"]:
+        footer.append(f"💾 {human_size(snap['file_size'])}")
+    if snap["status"] == "running" and snap["started_at"]:
+        footer.append(f"⏱ {human_eta(max(0.0, time.time() - snap['started_at']))}")
+    lines.append(" · ".join(footer))
     return "\n".join(lines)
 
 
@@ -160,23 +174,23 @@ def render_final(job: Job) -> str:
     if snap["status"] == "done" and snap["result"]:
         result = snap["result"]
         lines = [
-            "<b>✅ Mirror complete</b>",
-            f"<b>File:</b> {html.escape(snap['file_name'] or 'file')}",
-            f"<b>Size:</b> {human_size(snap['file_size'])}",
-            f"<b>Host:</b> {html.escape(result.host)}",
+            "✅ <b>Mirror complete</b>",
+            "",
+            f"📄 {html.escape(snap['file_name'] or 'file')}",
+            f"💾 {human_size(snap['file_size'])} · 📦 {html.escape(result.host)}",
         ]
         if snap["extras"]:
-            lines.append(f"<i>{snap['extras']} extra file(s) were skipped.</i>")
+            lines.append(f"<i>➕ {snap['extras']} extra file(s) were skipped.</i>")
         url = html.escape(result.url, quote=True)
-        lines.append(f'<b>Link:</b> <a href="{url}">{url}</a>')
+        lines.extend(["", f'🔗 <a href="{url}">{url}</a>'])
         return "\n".join(lines)
 
     if snap["status"] == "cancelled":
-        return f"<b>⏹ Cancelled</b> · <code>{snap['id']}</code>"
+        return f"⏹️ <b>Cancelled</b> · <code>{snap['id']}</code>"
 
     reason = snap["error"] or "Unknown error."
     return (
-        f"<b>❌ Mirror failed</b> · <code>{snap['id']}</code>\n"
+        f"❌ <b>Mirror failed</b> · <code>{snap['id']}</code>\n"
         f"<b>Reason:</b> {html.escape(str(reason))}"
     )
 
@@ -547,9 +561,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     lines = ["<b>Active jobs</b>"]
     for job in jobs[:10]:
         snap = job.snapshot()
-        stage = snap["stage"].title()
+        icon, title = STAGE_STYLES.get(snap["stage"], ("⚙️", snap["stage"].title()))
         percent = f" · {snap['percent']:.0f}%" if snap["percent"] is not None else ""
-        lines.append(f"<code>{snap['id']}</code> · {stage}{percent}")
+        lines.append(f"{icon} <code>{snap['id']}</code> · <b>{title}</b>{percent}")
+        if snap["detail"]:
+            lines.append(f"<i>{html.escape(str(snap['detail']))}</i>")
     await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 

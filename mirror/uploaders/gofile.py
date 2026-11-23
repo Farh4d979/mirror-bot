@@ -11,7 +11,7 @@ import requests
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 
 from ..errors import JobCancelled, UploadError
-from ..utils import CancelToken, human_size
+from ..utils import CancelToken, format_progress, SpeedMeter
 from .base import ProgressCB, Uploader, UploadResult
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,7 @@ class GofileUploader(Uploader):
 
     def _upload_once(self, path: Path, progress: ProgressCB, cancel: CancelToken) -> UploadResult:
         progress(0, "Contacting Gofile…")
+        file_size = path.stat().st_size
         with path.open("rb") as handle:
             # The upload endpoint takes the account token as a form field (the
             # same way gofile.io's own web client sends it), not as a header.
@@ -66,11 +67,24 @@ class GofileUploader(Uploader):
             fields["file"] = (path.name, handle, "application/octet-stream")
             encoder = MultipartEncoder(fields=fields)
             total = encoder.len
+            meter = SpeedMeter()
+            state = {"last": 0.0}
 
             def on_progress(monitor: MultipartEncoderMonitor) -> None:
                 cancel.check()
+                now = time.monotonic()
+                complete = bool(total) and monitor.bytes_read >= total
+                if not complete and now - state["last"] < 0.25:
+                    return
+                state["last"] = now
+                # percent includes multipart overhead; show the real file size.
+                if total:
+                    done = min(file_size, int(monitor.bytes_read * file_size / total))
+                else:
+                    done = monitor.bytes_read
+                speed, eta = meter.update(done, file_size)
                 percent = monitor.bytes_read / total * 100 if total else None
-                progress(percent, f"{human_size(monitor.bytes_read)} / {human_size(total)}")
+                progress(percent, format_progress(done, file_size, speed, eta))
 
             monitor = MultipartEncoderMonitor(encoder, on_progress)
             response = self.session.post(
@@ -124,6 +138,7 @@ class GofileUploader(Uploader):
         if not url:
             raise UploadError("Gofile did not return a download link.")
 
+        progress(100.0, format_progress(file_size, file_size))
         logger.info("Gofile upload complete: %s", url)
         return UploadResult(url=str(url), host="Gofile")
 

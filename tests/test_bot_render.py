@@ -10,10 +10,28 @@ def test_render_running_job():
     job = new_job(user_id=1, chat_id=2, source="https://example.com/a.zip", host="gofile")
     job.update(status="running", stage="downloading", percent=42.0, detail="1.2 GB / 2.8 GB · 24 MB/s")
     text = render_job(job)
+    assert "⬇️" in text
     assert "Downloading" in text
     assert "42%" in text
     assert "Gofile" in text
     assert "1.2 GB" in text
+    assert "24 MB/s" in text
+
+
+def test_render_upload_stage_with_speed():
+    job = new_job(user_id=1, chat_id=2, source="https://example.com/a.zip", host="pixeldrain")
+    job.update(
+        status="running",
+        stage="uploading",
+        percent=63.0,
+        detail="3.7 GB / 5.9 GB · 24.6 MB/s · ETA 1m 30s",
+    )
+    text = render_job(job)
+    assert "⬆️" in text
+    assert "Uploading" in text
+    assert "63%" in text
+    assert "24.6 MB/s" in text
+    assert "Pixeldrain" in text
 
 
 def test_render_done_job():

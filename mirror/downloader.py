@@ -33,10 +33,11 @@ from .utils import (
     exceeds_limit,
     filename_from_headers,
     filename_from_url,
+    format_progress,
     human_size,
-    human_speed,
     parse_aria_size,
     sanitize_filename,
+    SpeedMeter,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,8 @@ ProgressCB = Callable[[Optional[float], str], None]
 
 READOUT_RE = re.compile(
     r"\[#\w+\s+([\d.]+\s*[KMGT]?i?B)/([\d.]+\s*[KMGT]?i?B)"
-    r"(?:\((\d+)%\))?(?:.*?\bDL:([\d.]+\s*[KMGT]?i?B))?",
+    r"(?:\((\d+)%\))?(?:.*?\bDL:([\d.]+\s*[KMGT]?i?B))?"
+    r"(?:.*?\bETA:(\S+))?",
     re.IGNORECASE,
 )
 
@@ -100,6 +102,15 @@ def _wait(cancel: CancelToken, seconds: float) -> None:
         if remaining <= 0:
             return
         time.sleep(min(1.0, remaining))
+
+
+def _parse_eta_text(value: str) -> Optional[float]:
+    """Parse aria2 ETA strings like 45s, 8m2s or 1h3m4s."""
+    match = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", (value or "").strip())
+    if not match or not any(match.groups()):
+        return None
+    hours, minutes, seconds = (int(part or 0) for part in match.groups())
+    return float(hours * 3600 + minutes * 60 + seconds)
 
 
 @dataclass(slots=True)
@@ -386,12 +397,13 @@ class Downloader:
                 match = READOUT_RE.search(line)
                 if not match:
                     continue
-                downloaded = match.group(1)
-                total = match.group(2)
+                downloaded_text = match.group(1)
+                total_text = match.group(2)
                 percent = float(match.group(3)) if match.group(3) else None
-                speed = match.group(4) or ""
+                speed_text = match.group(4) or ""
+                eta_text = match.group(5) or ""
 
-                total_bytes = parse_aria_size(total)
+                total_bytes = parse_aria_size(total_text)
                 if total_bytes and exceeds_limit(total_bytes, self.max_size):
                     process.terminate()
                     raise FileTooLarge(
@@ -405,9 +417,19 @@ class Downloader:
                         "Fetching torrent metadata…" if label == "torrent" else "Waiting for server…",
                     )
                     continue
-                detail = f"{downloaded} / {total}"
-                if speed and not speed.startswith("0"):
-                    detail += f" · {speed}/s"
+
+                downloaded_bytes = parse_aria_size(downloaded_text)
+                speed_bps = parse_aria_size(speed_text) if speed_text else None
+                eta_seconds = _parse_eta_text(eta_text) if eta_text else None
+                if downloaded_bytes is not None:
+                    detail = format_progress(
+                        downloaded_bytes, total_bytes, speed_bps, eta_seconds
+                    )
+                else:
+                    detail = f"{downloaded_text} / {total_text}"
+                    stats = format_progress(None, None, speed_bps, eta_seconds)
+                    if stats:
+                        detail += f" · {stats}"
                 progress(percent, detail)
 
             code = process.wait(timeout=60)
@@ -511,7 +533,7 @@ class Downloader:
                 )
 
             downloaded = 0
-            started = time.monotonic()
+            meter = SpeedMeter()
             with open(partial, "wb") as handle:
                 for chunk in response.iter_content(256 * 1024):
                     if not chunk:
@@ -523,11 +545,12 @@ class Downloader:
                             f"The file grew past the {human_size(self.max_size)} limit."
                         )
                     handle.write(chunk)
-                    elapsed = max(0.001, time.monotonic() - started)
-                    speed = downloaded / elapsed
                     percent = downloaded / total * 100 if total else None
-                    detail = f"{human_size(downloaded)} / {human_size(total)} · {human_speed(speed)}"
-                    progress(percent, detail)
+                    speed, eta = meter.update(downloaded, total)
+                    progress(
+                        percent,
+                        format_progress(downloaded, total, speed, eta),
+                    )
         except (JobCancelled, JobTimeout, FileTooLarge, DownloadError):
             partial.unlink(missing_ok=True)
             raise
@@ -707,12 +730,7 @@ class Downloader:
                 percent = downloaded / total * 100 if total else None
                 speed = data.get("speed")
                 eta = data.get("eta")
-                detail = f"{human_size(downloaded)} / {human_size(total)}"
-                if speed:
-                    detail += f" · {human_speed(speed)}"
-                if eta:
-                    detail += f" · ETA {int(eta)}s"
-                progress(percent, detail)
+                progress(percent, format_progress(downloaded, total, speed, eta))
             elif status == "finished":
                 progress(100, "Processing video…")
 
