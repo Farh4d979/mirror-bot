@@ -127,10 +127,20 @@ class PixeldrainUploader(Uploader):
             )
 
         if response.status_code in RETRYABLE_STATUS:
-            raise _Retryable(f"Pixeldrain returned HTTP {response.status_code}")
+            raise _Retryable(
+                f"Pixeldrain returned HTTP {response.status_code}: "
+                f"{_response_snippet(response)}"
+            )
         if response.status_code in {401, 403}:
+            detail = _response_snippet(response)
+            logger.warning(
+                "Pixeldrain rejected the upload (HTTP %s): %s",
+                response.status_code,
+                detail,
+            )
             raise UploadError(
-                "Pixeldrain rejected the API key. Check PIXELDRAIN_API_KEY."
+                f"Pixeldrain rejected the request (HTTP {response.status_code}): "
+                f"{detail}. Check PIXELDRAIN_API_KEY and its permissions."
             )
         if response.status_code == 413:
             raise UploadError(
@@ -139,17 +149,45 @@ class PixeldrainUploader(Uploader):
             )
         if response.status_code >= 400:
             raise UploadError(
-                f"Pixeldrain returned HTTP {response.status_code}: {response.text[:200]}"
+                f"Pixeldrain returned HTTP {response.status_code}: "
+                f"{_response_snippet(response)}"
             )
 
+        body = _response_snippet(response)
         try:
             payload = response.json()
         except ValueError as exc:
-            raise UploadError("Pixeldrain returned an unexpected response.") from exc
+            logger.warning(
+                "Pixeldrain returned non-JSON (HTTP %s): %s",
+                response.status_code,
+                body,
+            )
+            raise UploadError(
+                f"Pixeldrain returned an unexpected response "
+                f"(HTTP {response.status_code}): {body}"
+            ) from exc
+
+        if not isinstance(payload, dict):
+            logger.warning(
+                "Pixeldrain returned an unexpected JSON shape (HTTP %s): %s",
+                response.status_code,
+                body,
+            )
+            raise UploadError(
+                f"Pixeldrain returned an unexpected response "
+                f"(HTTP {response.status_code}): {body}"
+            )
 
         if not payload.get("success"):
-            message = payload.get("message") or payload.get("value") or "unknown error"
-            raise UploadError(f"Pixeldrain upload failed: {message}")
+            message = _payload_error(payload) or body
+            logger.warning(
+                "Pixeldrain upload failed (HTTP %s): %s",
+                response.status_code,
+                body,
+            )
+            raise UploadError(
+                f"Pixeldrain upload failed (HTTP {response.status_code}): {message}"
+            )
 
         file_id = payload.get("id")
         if not file_id:
@@ -158,6 +196,33 @@ class PixeldrainUploader(Uploader):
         link = f"https://pixeldrain.com/u/{file_id}"
         logger.info("Pixeldrain upload complete: %s", link)
         return UploadResult(url=link, host="Pixeldrain")
+
+
+def _response_snippet(response, limit: int = 300) -> str:
+    """Return a compact, single-line snippet of a response body."""
+    text = (getattr(response, "text", "") or "").strip()
+    if not text:
+        return "empty body"
+    return " ".join(text.split())[:limit]
+
+
+def _payload_error(payload: dict) -> str:
+    """Extract the most useful error string from a Pixeldrain JSON payload."""
+    for key in ("message", "value", "error", "detail"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, dict):
+            nested = value.get("message") or value.get("value")
+            if isinstance(nested, str) and nested:
+                return nested
+    errors = payload.get("errors")
+    if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+        first = errors[0]
+        nested = first.get("message") or first.get("value")
+        if isinstance(nested, str) and nested:
+            return nested
+    return ""
 
 
 def _sleep(seconds: float, cancel: CancelToken) -> None:

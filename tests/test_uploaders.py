@@ -201,11 +201,49 @@ def test_pixeldrain_upload(tmp_path):
     assert session.last_headers["Content-Length"] == "5"
 
 
+def test_pixeldrain_error_includes_response_body(tmp_path):
+    source = tmp_path / "hello.txt"
+    source.write_text("hello")
+    response = FakeResponse(200, {"success": False}, text='{"success":false}')
+    with pytest.raises(UploadError, match=r"HTTP 200") as excinfo:
+        PixeldrainUploader("secret", session=FakeSession(response)).upload(
+            source, lambda percent, detail: None, CancelToken()
+        )
+    assert '{"success":false}' in str(excinfo.value)
+
+
+def test_pixeldrain_error_uses_message_field(tmp_path):
+    source = tmp_path / "hello.txt"
+    source.write_text("hello")
+    response = FakeResponse(
+        200,
+        {"success": False, "value": "user_out_of_space", "message": "No space left"},
+        text='{"success":false}',
+    )
+    with pytest.raises(UploadError, match="No space left"):
+        PixeldrainUploader("secret", session=FakeSession(response)).upload(
+            source, lambda percent, detail: None, CancelToken()
+        )
+
+
+def test_pixeldrain_non_json_error_includes_body(tmp_path):
+    source = tmp_path / "hello.txt"
+    source.write_text("hello")
+    response = FakeResponse(200, text="<html>blocked by proxy</html>")
+    with pytest.raises(UploadError) as excinfo:
+        PixeldrainUploader("secret", session=FakeSession(response)).upload(
+            source, lambda percent, detail: None, CancelToken()
+        )
+    message = str(excinfo.value)
+    assert "HTTP 200" in message
+    assert "blocked by proxy" in message
+
+
 def test_pixeldrain_rejects_bad_key(tmp_path):
     source = tmp_path / "hello.txt"
     source.write_text("hello")
     session = FakeSession(FakeResponse(401, text="unauthorized"))
-    with pytest.raises(UploadError, match="API key"):
+    with pytest.raises(UploadError, match="PIXELDRAIN_API_KEY"):
         PixeldrainUploader("bad", session=session).upload(
             source, lambda percent, detail: None, CancelToken()
         )
