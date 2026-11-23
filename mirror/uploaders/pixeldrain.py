@@ -178,7 +178,11 @@ class PixeldrainUploader(Uploader):
                 f"(HTTP {response.status_code}): {body}"
             )
 
-        if not payload.get("success"):
+        success = payload.get("success")
+        failed = success is False or success == 0 or (
+            isinstance(success, str) and success.strip().lower() in {"false", "0"}
+        )
+        if failed:
             message = _payload_error(payload) or body
             logger.warning(
                 "Pixeldrain upload failed (HTTP %s): %s",
@@ -191,7 +195,15 @@ class PixeldrainUploader(Uploader):
 
         file_id = payload.get("id")
         if not file_id:
-            raise UploadError("Pixeldrain did not return a file ID.")
+            logger.warning(
+                "Pixeldrain did not return a file ID (HTTP %s): %s",
+                response.status_code,
+                body,
+            )
+            raise UploadError(
+                f"Pixeldrain did not return a file ID "
+                f"(HTTP {response.status_code}): {body}"
+            )
 
         link = f"https://pixeldrain.com/u/{file_id}"
         logger.info("Pixeldrain upload complete: %s", link)

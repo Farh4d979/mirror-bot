@@ -239,6 +239,25 @@ def test_pixeldrain_non_json_error_includes_body(tmp_path):
     assert "blocked by proxy" in message
 
 
+def test_pixeldrain_accepts_file_object_response(tmp_path):
+    source = tmp_path / "hello.txt"
+    source.write_text("hello")
+    payload = {
+        "id": "z73RAhfT",
+        "name": "hello.txt",
+        "size": 5,
+        "mime_type": "text/plain",
+        "can_download": True,
+    }
+    response = FakeResponse(201, payload)
+    result = PixeldrainUploader("secret", session=FakeSession(response)).upload(
+        source, lambda percent, detail: None, CancelToken()
+    )
+
+    assert result.url == "https://pixeldrain.com/u/z73RAhfT"
+    assert result.host == "Pixeldrain"
+
+
 def test_pixeldrain_rejects_bad_key(tmp_path):
     source = tmp_path / "hello.txt"
     source.write_text("hello")
