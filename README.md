@@ -275,4 +275,13 @@ Dockerfile                 aria2 + ffmpeg + bot
 
 ## License
 
-MIT
+Copyright (C) 2026 Farhad.
+
+This project is licensed under the **GNU Affero General Public License v3.0** — see [LICENSE](LICENSE) for the full text.
+
+You may fork, modify, and self-host it. If you distribute a modified version, the AGPL requires you to keep this license, preserve the copyright notices, and make the corresponding source available. If you run a modified version as a network service that other people use, those users must be able to get its source code. In short: you can fork it, but you cannot take it, strip the license, and republish it as a closed or hidden project.
+
+Two practical notes:
+
+- GitHub does not allow a fork of a public repository to be made private, so public forks stay public.
+- No open-source license can forbid private, personal use of an unmodified copy. The AGPL's source-sharing obligations apply when you distribute the software or let others use it over a network.
