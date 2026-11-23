@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import sys
+import threading
+import time
+
+import pytest
 import responses
 
 from mirror.config import Settings
@@ -9,7 +14,7 @@ from mirror.downloader import (
     _is_gofile_url,
     _looks_like_rate_limit,
 )
-from mirror.errors import DownloadError
+from mirror.errors import DownloadError, JobCancelled
 from mirror.resolver import ResolvedLink
 from mirror.utils import CancelToken
 
@@ -374,3 +379,172 @@ def test_download_parts_zip_mode_downloads_all(tmp_path, monkeypatch):
     assert result.path.suffix == ".zip"
     assert result.path.exists()
     assert result.size > 0
+
+
+def test_gallery_uses_gallery_dl(tmp_path, monkeypatch):
+    downloader = Downloader(make_settings(tmp_path), CancelToken())
+    captured = {}
+    monkeypatch.setattr(
+        "mirror.downloader._tool_command",
+        lambda executable, module=None: ["gallery-dl"],
+    )
+
+    def fake_run_tool(command, dest, progress, *, label, on_line=None):
+        captured["command"] = command
+        captured["label"] = label
+        (dest / "image.jpg").write_bytes(b"x" * 10)
+        if on_line:
+            on_line("[download] image.jpg")
+
+    monkeypatch.setattr(downloader, "_run_tool", fake_run_tool)
+    progress_updates = []
+    result = downloader._gallery(
+        "https://www.pixiv.net/artworks/123",
+        tmp_path,
+        lambda percent, detail: progress_updates.append(detail),
+    )
+
+    assert result.path.name == "image.jpg"
+    assert captured["label"] == "gallery-dl"
+    command = captured["command"]
+    assert "-d" in command
+    assert str(tmp_path) in command
+    assert "--filesize-max" in command
+    assert command[-1] == "https://www.pixiv.net/artworks/123"
+    assert any("Downloading" in detail for detail in progress_updates)
+
+
+def test_gallery_without_gallery_dl_fails_clearly(tmp_path, monkeypatch):
+    downloader = Downloader(make_settings(tmp_path), CancelToken())
+    monkeypatch.setattr("mirror.downloader._tool_command", lambda *args, **kwargs: None)
+
+    with pytest.raises(DownloadError, match="gallery-dl"):
+        downloader._gallery(
+            "https://www.pixiv.net/artworks/123",
+            tmp_path,
+            lambda percent, detail: None,
+        )
+
+
+def test_mega_uses_megadl(tmp_path, monkeypatch):
+    downloader = Downloader(make_settings(tmp_path), CancelToken())
+    captured = {}
+    monkeypatch.setattr(
+        "mirror.downloader._tool_command",
+        lambda executable, module=None: ["megadl"],
+    )
+
+    def fake_run_tool(command, dest, progress, *, label, on_line=None):
+        captured["command"] = command
+        captured["label"] = label
+        (dest / "file.bin").write_bytes(b"x" * 10)
+        if on_line:
+            on_line("file.bin")
+
+    monkeypatch.setattr(downloader, "_run_tool", fake_run_tool)
+    result = downloader._mega(
+        "https://mega.nz/file/abc123#key",
+        tmp_path,
+        lambda percent, detail: None,
+    )
+
+    assert result.path.name == "file.bin"
+    assert captured["label"] == "megadl"
+    command = captured["command"]
+    assert "--path" in command
+    assert str(tmp_path) in command
+    assert "--print-names" in command
+    assert "--no-progress" in command
+    assert command[-1] == "https://mega.nz/file/abc123#key"
+
+
+def test_mega_without_megatools_fails_clearly(tmp_path, monkeypatch):
+    downloader = Downloader(make_settings(tmp_path), CancelToken())
+    monkeypatch.setattr("mirror.downloader._tool_command", lambda *args, **kwargs: None)
+
+    with pytest.raises(DownloadError, match="megatools"):
+        downloader._mega(
+            "https://mega.nz/file/abc123#key",
+            tmp_path,
+            lambda percent, detail: None,
+        )
+
+
+def test_ytdlp_failure_falls_back_to_gallery(tmp_path, monkeypatch):
+    downloader = Downloader(make_settings(tmp_path), CancelToken())
+    calls = []
+
+    def fake_ytdlp(url, dest, progress):
+        calls.append(("ytdlp", url))
+        raise DownloadError("no video found")
+
+    def fake_gallery(url, dest, progress):
+        calls.append(("gallery", url))
+        path = dest / "image.jpg"
+        path.write_bytes(b"x")
+        return DownloadResult(path=path, size=1)
+
+    monkeypatch.setattr(downloader, "_ytdlp", fake_ytdlp)
+    monkeypatch.setattr(downloader, "_gallery", fake_gallery)
+    monkeypatch.setattr(
+        "mirror.downloader._tool_command",
+        lambda executable, module=None: ["gallery-dl"],
+    )
+
+    link = ResolvedLink(
+        url="https://www.reddit.com/r/pics/comments/abc/title/",
+        kind="ytdlp",
+        allow_gallery_fallback=True,
+    )
+    result = downloader.download(
+        original_url=link.url,
+        link=link,
+        dest=tmp_path / "out",
+        progress=lambda percent, detail: None,
+    )
+
+    assert result.path.name == "image.jpg"
+    assert [call[0] for call in calls] == ["ytdlp", "gallery"]
+    assert result.path.parent.name == "gallery"
+
+
+def test_ytdlp_failure_without_gallery_fallback_raises(tmp_path, monkeypatch):
+    downloader = Downloader(make_settings(tmp_path), CancelToken())
+
+    def fake_ytdlp(url, dest, progress):
+        raise DownloadError("no video found")
+
+    monkeypatch.setattr(downloader, "_ytdlp", fake_ytdlp)
+    link = ResolvedLink(
+        url="https://example.com/video",
+        kind="ytdlp",
+        allow_gallery_fallback=False,
+    )
+
+    with pytest.raises(DownloadError, match="no video found"):
+        downloader.download(
+            original_url=link.url,
+            link=link,
+            dest=tmp_path / "out",
+            progress=lambda percent, detail: None,
+        )
+
+
+def test_run_tool_cancels_while_tool_is_silent(tmp_path, monkeypatch):
+    monkeypatch.setattr("mirror.downloader.TOOL_POLL_SECONDS", 0.05)
+    cancel = CancelToken()
+    downloader = Downloader(make_settings(tmp_path), cancel)
+
+    def cancel_soon() -> None:
+        time.sleep(0.2)
+        cancel.cancel()
+
+    threading.Thread(target=cancel_soon, daemon=True).start()
+
+    with pytest.raises(JobCancelled):
+        downloader._run_tool(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            tmp_path,
+            lambda percent, detail: None,
+            label="silent-tool",
+        )

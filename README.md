@@ -2,7 +2,7 @@
 
 A Telegram bot that takes a link or a file, downloads it if needed, and re-uploads it to **Gofile or Pixeldrain**.
 
-It handles direct file links, web pages where the file is hidden behind a "Download" button, video sites supported by yt-dlp, magnet links, `.torrent` files, and files sent directly in Telegram.
+It handles direct file links, web pages where the file is hidden behind a "Download" button, video sites supported by yt-dlp, image galleries supported by gallery-dl, public MEGA links, magnet links, `.torrent` files, and files sent directly in Telegram.
 
 ```
 Telegram link / .torrent / file
@@ -11,7 +11,7 @@ Telegram link / .torrent / file
    Resolver (HTML buttons, meta refresh, data-url, JSON-LD, Google Drive, GitHub releases…)
           │
           ▼
-   aria2c (HTTP / torrent)  or  yt-dlp (video sites)
+   aria2c (HTTP / torrent), yt-dlp (video), gallery-dl (galleries), megadl (MEGA)
           │
           ▼
    Gofile or Pixeldrain upload
@@ -26,6 +26,8 @@ Telegram link / .torrent / file
 - "Download button" pages: scans links, buttons, `data-*` URLs, meta refresh, embedded video/audio, JSON-LD and common JavaScript redirects.
 - Special handling for Google Drive single files, Dropbox, Pixeldrain links, Gofile share links, MediaFire-style buttons, and GitHub releases.
 - Video sites through yt-dlp (YouTube, Vimeo, TikTok, X/Twitter, Reddit, etc.).
+- Image galleries through gallery-dl (Pixiv, Danbooru, Gelbooru, Imgur albums, DeviantArt, Flickr, ArtStation, Tumblr, Reddit image posts, and many more).
+- Public MEGA file and folder links through megatools (`megadl`).
 - Magnet links and `.torrent` files through aria2c (DHT enabled, seeding disabled).
 - Files sent directly in Telegram — documents, photos, video, audio, voice notes, animations and stickers — are uploaded to Gofile. Reply with `/px` to send them to Pixeldrain instead. Telegram's cloud Bot API limits bot downloads to 20 MB per attachment.
 - Gofile share links (`gofile.io/d/...`) resolve through Gofile's API using a temporary guest token. Folder links are supported; the bot downloads the largest file or every file in `MULTI_FILE_MODE=zip`.
@@ -90,7 +92,7 @@ The automatic hand-off makes Actions effectively continuous, but it is still bes
 
 ## Local setup
 
-Requirements: Python 3.10+ (3.12 recommended), [aria2](https://aria2.github.io/) and ffmpeg. Without aria2, direct HTTP downloads still work through Python, but torrents/magnets do not.
+Requirements: Python 3.10+ (3.12 recommended), [aria2](https://aria2.github.io/) and ffmpeg. Without aria2, direct HTTP downloads still work through Python, but torrents/magnets do not. MEGA links additionally need megatools (`megadl`). gallery-dl and yt-dlp are installed from `requirements.txt`.
 
 ```bash
 python -m venv .venv
@@ -111,13 +113,14 @@ Install the system tools:
 # Windows
 winget install aria2.aria2
 winget install Gyan.FFmpeg
+# MEGA links need megatools; use WSL or the Docker image on Windows.
 ```
 
 ```bash
 # Debian/Ubuntu
-sudo apt update && sudo apt install -y aria2 ffmpeg
+sudo apt update && sudo apt install -y aria2 ffmpeg megatools
 # macOS
-brew install aria2 ffmpeg
+brew install aria2 ffmpeg megatools
 ```
 
 ## Docker
@@ -131,7 +134,7 @@ docker run -d --name mirror-bot \
   mirror-bot
 ```
 
-The image includes aria2 and ffmpeg. Downloads and state live in `/data`.
+The image includes aria2, ffmpeg, megatools and gallery-dl. Downloads and state live in `/data`.
 
 ## Configuration
 
@@ -147,7 +150,7 @@ The image includes aria2 and ffmpeg. Downloads and state live in `/data`.
 | `BOT_RUN_SECONDS` | `0` | Stop after N seconds; `0` = run until stopped |
 | `MULTI_FILE_MODE` | `largest` | For torrents/multi-file downloads: upload the largest file, or `zip` everything |
 | `YTDLP_FORMAT` | `bv*+ba/b` | yt-dlp format selector |
-| `COOKIES_FILE` | empty | Optional Netscape cookies file for restricted video sites |
+| `COOKIES_FILE` | empty | Optional Netscape cookies file for restricted video sites and galleries |
 | `DOWNLOAD_DIR` | `downloads` | Temporary download directory |
 | `STATE_FILE` | `.state/telegram.json` | Telegram offset state |
 | `ARIA2C_PATH` | `aria2c` | Path to the aria2c binary |
@@ -184,8 +187,9 @@ In groups, use commands such as `/gf@YourBot <link>`. Plain links are ignored th
 | Gofile share links (`gofile.io/d/...`) | ✅ Gofile API, guest token, folders supported |
 | MediaFire / SourceForge / similar pages | ✅ when the download link is in the HTML |
 | YouTube, Vimeo, TikTok, X, Reddit, etc. | ✅ yt-dlp |
+| Image galleries: Pixiv, Danbooru, Gelbooru, Imgur albums, DeviantArt, Flickr, ArtStation, Tumblr | ✅ gallery-dl |
+| Public MEGA file and folder links | ✅ megatools (`megadl`) |
 | Magnet links and `.torrent` files | ✅ aria2c |
-| MEGA links | ❌ encrypted |
 | Google Drive folders | ❌ not supported |
 | Password-protected Gofile folders | ❌ not supported |
 | Login/CAPTCHA/DRM-protected pages | ❌ not supported |
@@ -214,7 +218,11 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 
 **Torrents do not start** — install aria2c (`aria2c --version`) and make sure the workflow/Docker image includes it. A magnet with no seeders stops after 5 minutes (`--bt-stop-timeout=300`).
 
-**Video download fails** — update yt-dlp (`pip install -U yt-dlp`). Age/region-locked sites may need `COOKIES_FILE`. GitHub Actions IPs are frequently blocked by YouTube; a VPS is more reliable for video sites.
+**Video download fails** - update yt-dlp (`pip install -U yt-dlp`). Age/region-locked sites may need `COOKIES_FILE`. GitHub Actions IPs are frequently blocked by YouTube; a VPS is more reliable for video sites.
+
+**Gallery download fails** - update gallery-dl (`pip install -U gallery-dl`). Login-only galleries may need `COOKIES_FILE`. Direct image URLs still go through aria2c and do not need gallery-dl.
+
+**MEGA download fails** - install megatools (`apt install megatools`). The link must be a public/exported file or folder link, and MEGA transfer quotas still apply.
 
 **Torrents do not connect** — many datacenter networks block BitTorrent. Try a VPS, or use a direct link.
 
@@ -231,7 +239,7 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 - Set `ALLOWED_USER_IDS`. In private chats the bot only answers those IDs. A group is enabled only while one of those IDs is a member, and every member can then use it, so only add it to groups you trust. Group members use your runner, bandwidth and upload accounts.
 - The bot blocks localhost/private-network URLs to reduce SSRF risk, but do not expose it to untrusted users.
 - Never commit `.env` or tokens. The GitHub Actions secrets are the right place.
-- Only mirror content you have the right to copy. Respect the terms of service of the source site, Gofile, and Pixeldrain.
+- Only mirror content you have the right to copy. Respect the terms of service of the source site, Gofile, and Pixeldrain. yt-dlp, gallery-dl and megatools only access content the link already exposes; the bot does not bypass logins, paywalls, DRM or CAPTCHAs.
 - Gofile guest uploads create a new public folder per upload. Use `GOFILE_TOKEN` if you want uploads tied to your account.
 - The Pixeldrain API key is used for `/px` uploads and authenticated Pixeldrain downloads. It is sent only to `pixeldrain.com` hosts. The bot does not bypass Pixeldrain's limits, hotlink protection, or CAPTCHA; those require a paid Pixeldrain plan or the site's normal download flow.
 

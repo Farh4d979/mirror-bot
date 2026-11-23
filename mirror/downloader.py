@@ -1,4 +1,5 @@
-"""Download engines: aria2c for HTTP/torrent, yt-dlp for video sites."""
+"""Download engines: aria2c for HTTP/torrent, yt-dlp for video sites,
+gallery-dl for image galleries, megadl for MEGA links."""
 
 from __future__ import annotations
 
@@ -7,6 +8,7 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -48,6 +50,9 @@ READOUT_RE = re.compile(
 )
 
 RETRYABLE_HTTP_STATUS = frozenset({429, 500, 502, 503, 504})
+
+# How often a long-running helper tool is checked for /cancel and JOB_TIMEOUT.
+TOOL_POLL_SECONDS = 2.0
 
 # aria2 1.37 (the version shipped on GitHub's Ubuntu runners) does not support
 # --retry-on-http-error, so a 429 has to be retried by this outer loop.
@@ -126,7 +131,28 @@ class Downloader:
         if link.kind == "torrent":
             return self._torrent(link.url, dest, progress, referer=link.referer)
         if link.kind == "ytdlp":
-            return self._ytdlp(original_url, dest, progress)
+            try:
+                return self._ytdlp(original_url, dest, progress)
+            except (JobCancelled, JobTimeout):
+                raise
+            except DownloadError as exc:
+                if not link.allow_gallery_fallback or not _tool_command(
+                    "gallery-dl", "gallery_dl"
+                ):
+                    raise
+                progress(None, "Video extractor failed, trying the gallery engine…")
+                try:
+                    gallery_dest = dest / "gallery"
+                    gallery_dest.mkdir(parents=True, exist_ok=True)
+                    return self._gallery(link.url, gallery_dest, progress)
+                except (JobCancelled, JobTimeout):
+                    raise
+                except MirrorError:
+                    raise exc
+        if link.kind == "gallery":
+            return self._gallery(link.url, dest, progress)
+        if link.kind == "mega":
+            return self._mega(link.url, dest, progress)
 
         if link.parts:
             return self._download_parts(link, dest, progress)
@@ -337,6 +363,7 @@ class Downloader:
             process = subprocess.Popen(
                 command,
                 cwd=str(dest),
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -518,6 +545,150 @@ class Downloader:
         partial.replace(target)
         return DownloadResult(path=target, size=target.stat().st_size)
 
+    # ------------------------------------------------------- gallery-dl / MEGA
+    def _gallery(self, url: str, dest: Path, progress: ProgressCB) -> DownloadResult:
+        command = _tool_command("gallery-dl", "gallery_dl")
+        if not command:
+            raise DownloadError(
+                "Image gallery links need gallery-dl. Install it with "
+                "`pip install gallery-dl` (it is in requirements.txt) and restart the bot."
+            )
+
+        progress(None, "Downloading gallery…")
+        args = [
+            *command,
+            "--config-ignore",
+            "-d", str(dest),
+            "--no-part",
+            "--no-mtime",
+            "--no-colors",
+            "--retries", "5",
+            "--http-timeout", "30",
+            f"--user-agent={USER_AGENT}",
+        ]
+        if self.max_size > 0:
+            args += ["--filesize-max", str(self.max_size)]
+        if self.settings.cookies_file and self.settings.cookies_file.exists():
+            args += ["--cookies", str(self.settings.cookies_file)]
+        args.append(url)
+
+        def on_line(line: str) -> None:
+            if line.startswith("[download]") or "Downloading" in line:
+                progress(None, line[:200])
+
+        self._run_tool(args, dest, progress, label="gallery-dl", on_line=on_line)
+        result = self._collect(dest)
+        if exceeds_limit(result.size, self.max_size):
+            raise FileTooLarge(
+                f"The largest gallery file is {human_size(result.size)}, above the "
+                f"{human_size(self.max_size)} limit."
+            )
+        return result
+
+    def _mega(self, url: str, dest: Path, progress: ProgressCB) -> DownloadResult:
+        command = _tool_command("megadl")
+        if not command:
+            raise DownloadError(
+                "MEGA links need megatools. Install it with `apt install megatools` "
+                "(or use the Docker image) and restart the bot."
+            )
+
+        progress(None, "Downloading from MEGA…")
+        args = [
+            *command,
+            "--path", str(dest),
+            "--print-names",
+            "--no-progress",
+            url,
+        ]
+
+        def on_line(line: str) -> None:
+            progress(None, f"Downloaded {line}"[:200])
+
+        self._run_tool(args, dest, progress, label="megadl", on_line=on_line)
+        result = self._collect(dest)
+        if exceeds_limit(result.size, self.max_size):
+            raise FileTooLarge(
+                f"The largest MEGA file is {human_size(result.size)}, above the "
+                f"{human_size(self.max_size)} limit."
+            )
+        return result
+
+    def _run_tool(
+        self,
+        command: list[str],
+        dest: Path,
+        progress: ProgressCB,
+        *,
+        label: str,
+        on_line: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        logger.info("Starting %s", label)
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=str(dest),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+            )
+        except OSError as exc:
+            raise DownloadError(f"Could not start {label}: {exc}") from exc
+
+        failure: list[MirrorError] = []
+        stop = threading.Event()
+
+        def watchdog() -> None:
+            # Tools like megadl --no-progress can be silent for many minutes, so
+            # check cancellation/deadline on a timer instead of only on output.
+            while not stop.wait(TOOL_POLL_SECONDS):
+                try:
+                    self.cancel.check()
+                except MirrorError as exc:
+                    failure.append(exc)
+                    _terminate(process)
+                    return
+
+        watcher = threading.Thread(target=watchdog, daemon=True)
+        watcher.start()
+
+        tail: deque[str] = deque(maxlen=25)
+        try:
+            assert process.stdout is not None
+            for raw_line in process.stdout:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                tail.append(line)
+                self.cancel.check()
+                if on_line:
+                    on_line(line)
+            code = process.wait(timeout=60)
+        except (JobCancelled, JobTimeout):
+            _terminate(process)
+            raise
+        except subprocess.TimeoutExpired:
+            _terminate(process)
+            raise DownloadError(f"{label} did not exit after finishing the transfer.")
+        finally:
+            stop.set()
+            watcher.join(timeout=5)
+            if process.poll() is None:
+                _terminate(process)
+
+        if failure:
+            raise failure[0]
+        if code != 0:
+            if self.cancel.cancelled:
+                raise JobCancelled("Cancelled.")
+            details = [line for line in tail if line]
+            message = " | ".join(details[-4:]) or f"no details from {label}"
+            raise DownloadError(f"{label} failed with exit code {code}: {message}")
+
     # ------------------------------------------------------------------- yt-dlp
     def _ytdlp_available(self) -> bool:
         return importlib.util.find_spec("yt_dlp") is not None
@@ -610,6 +781,20 @@ class Downloader:
         if extras:
             logger.info("Picked the largest of %d downloaded files", len(files))
         return DownloadResult(path=largest, size=largest.stat().st_size, extras=extras)
+
+
+def _tool_command(executable: str, module: Optional[str] = None) -> Optional[list[str]]:
+    """Find a CLI tool, falling back to `python -m <module>` when needed."""
+    found = shutil.which(executable)
+    if found:
+        return [found]
+    if module:
+        try:
+            if importlib.util.find_spec(module) is not None:
+                return [sys.executable, "-m", module]
+        except (ImportError, ValueError):
+            pass
+    return None
 
 
 def _terminate(process: subprocess.Popen) -> None:

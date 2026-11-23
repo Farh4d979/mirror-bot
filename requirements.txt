@@ -3,4 +3,5 @@ requests>=2.32,<3
 requests-toolbelt>=1.0,<2
 beautifulsoup4>=4.12,<5
 yt-dlp>=2024.12.13
+gallery-dl>=1.29,<2
 python-dotenv>=1.0,<2

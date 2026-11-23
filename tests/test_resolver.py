@@ -152,8 +152,8 @@ def test_special_urls():
     dropbox = resolver._special_url("https://www.dropbox.com/s/abc/file.zip?dl=0")
     assert "dl=1" in dropbox
 
-    with pytest.raises(ResolutionError):
-        resolver._special_url("https://mega.nz/file/abc#key")
+    mega = resolver._special_url("https://mega.nz/file/abc#key")
+    assert mega == "https://mega.nz/file/abc#key"
 
 
 def test_pixeldrain_auth_only_applies_to_pixeldrain():
@@ -524,3 +524,39 @@ def test_resolve_gofile_missing_link():
     resolver = Resolver(allow_private_urls=True, session=session)
     with pytest.raises(ResolutionError, match="does not exist"):
         resolver.resolve("https://gofile.io/d/gone")
+
+
+def test_resolve_mega_file_uses_mega_engine():
+    resolver = Resolver(allow_private_urls=True, session=FakeSession())
+    link = resolver.resolve("https://mega.nz/file/abc123#secret-key")
+
+    assert link.kind == "mega"
+    assert link.url == "https://mega.nz/file/abc123#secret-key"
+    assert link.allow_ytdlp_fallback is False
+
+
+def test_resolve_mega_folder_uses_mega_engine():
+    resolver = Resolver(allow_private_urls=True, session=FakeSession())
+    link = resolver.resolve("https://mega.nz/folder/abc123#secret-key")
+
+    assert link.kind == "mega"
+
+
+def test_resolve_gallery_site_uses_gallery_engine():
+    resolver = Resolver(allow_private_urls=True, session=FakeSession())
+
+    for url in (
+        "https://www.pixiv.net/artworks/123456",
+        "https://danbooru.donmai.us/posts?tags=landscape",
+        "https://imgur.com/a/abc123",
+    ):
+        link = resolver.resolve(url)
+        assert link.kind == "gallery"
+        assert link.allow_ytdlp_fallback is False
+
+
+def test_direct_image_urls_stay_http():
+    assert not resolver_module._is_gallery_url("https://i.imgur.com/abc123.jpg")
+    assert not resolver_module._is_gallery_url("https://imgur.com/abc123.jpg")
+    assert not resolver_module._is_gallery_url("https://cdn.donmai.us/abc123.jpg")
+    assert resolver_module._is_gallery_url("https://imgur.com/gallery/abc123")

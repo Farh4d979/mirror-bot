@@ -121,6 +121,34 @@ VIDEO_SITE = re.compile(
     re.IGNORECASE,
 )
 
+# Hosts whose pages are image galleries/collections rather than single files.
+# gallery-dl handles these; yt-dlp is for video sites.
+GALLERY_HOSTS = frozenset(
+    {
+        "pixiv.net",
+        "danbooru.donmai.us",
+        "gelbooru.com",
+        "safebooru.org",
+        "e-hentai.org",
+        "exhentai.org",
+        "e621.net",
+        "rule34.xxx",
+        "konachan.com",
+        "yande.re",
+        "deviantart.com",
+        "artstation.com",
+        "flickr.com",
+        "tumblr.com",
+        "pinterest.com",
+        "bsky.app",
+        "weibo.com",
+        "lofter.com",
+        "imgur.com",
+    }
+)
+
+MEGA_HOSTS = frozenset({"mega.nz", "mega.co.nz", "mega.io"})
+
 TORRENT_TYPES = {"application/x-bittorrent", "application/x-bittorrent; charset=utf-8"}
 HTML_TYPES = {"text/html", "application/xhtml+xml"}
 
@@ -132,10 +160,11 @@ class ResolvedLink:
     referer: Optional[str] = None
     content_type: Optional[str] = None
     size: Optional[int] = None
-    kind: str = "http"  # http | torrent | magnet | ytdlp
+    kind: str = "http"  # http | torrent | magnet | ytdlp | gallery | mega
     headers: Optional[dict[str, str]] = None
     parts: list[ResolvedLink] = field(default_factory=list)
     allow_ytdlp_fallback: bool = True
+    allow_gallery_fallback: bool = False
     force_download: bool = False
 
 
@@ -181,6 +210,12 @@ class Resolver:
         if not self.allow_private_urls:
             validate_http_url(url)
 
+        if _is_mega_url(url):
+            return ResolvedLink(url=url, kind="mega", allow_ytdlp_fallback=False)
+
+        if _is_gallery_url(url):
+            return ResolvedLink(url=url, kind="gallery", allow_ytdlp_fallback=False)
+
         gofile_code = _gofile_code(url)
         if gofile_code:
             return self._resolve_gofile(gofile_code)
@@ -189,7 +224,12 @@ class Resolver:
         host = (urlparse(url).hostname or "").lower().removeprefix("www.")
         is_pixeldrain = _is_pixeldrain_url(url)
         if VIDEO_SITE.search(host):
-            return ResolvedLink(url=url, kind="ytdlp", filename=None)
+            return ResolvedLink(
+                url=url,
+                kind="ytdlp",
+                filename=None,
+                allow_gallery_fallback=True,
+            )
 
         if depth > 2:
             raise ResolutionError("Too many redirect pages while looking for the file.")
@@ -327,12 +367,6 @@ class Resolver:
                             return release["zipball_url"]
                 except (requests.RequestException, ValueError):
                     pass
-
-        if host == "mega.nz" or host == "mega.co.nz":
-            raise ResolutionError(
-                "MEGA links are end-to-end encrypted and cannot be mirrored by this bot. "
-                "Use a direct link instead."
-            )
 
         if host == "pixeldrain.com" and path.startswith("/u/"):
             file_id = path.split("/u/", 1)[1].split("/")[0]
@@ -775,6 +809,25 @@ class Resolver:
             reverse=True,
         )
         return [(score, link) for link, score in candidates], title
+
+
+def _is_gallery_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if host not in GALLERY_HOSTS:
+        return False
+    if host == "imgur.com":
+        path = parsed.path or "/"
+        if path.startswith(("/a/", "/gallery/", "/user/")):
+            return True
+        # Direct image links (i.imgur.com/... or imgur.com/file.jpg) stay HTTP.
+        return not FILE_EXT.search(path)
+    return True
+
+
+def _is_mega_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    return host in MEGA_HOSTS
 
 
 def _is_pixeldrain_url(url: str) -> bool:
