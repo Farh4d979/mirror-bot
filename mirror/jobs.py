@@ -40,6 +40,7 @@ class Job:
     chat_id: int
     source: str
     host: str
+    user_name: str = ""
     source_kind: str = "url"  # url | torrent_file | telegram_file
     local_path: Optional[Path] = None
     status: str = "queued"
@@ -67,6 +68,7 @@ class Job:
             return {
                 "id": self.id,
                 "user_id": self.user_id,
+                "user_name": self.user_name,
                 "chat_id": self.chat_id,
                 "source": self.source,
                 "host": self.host,
@@ -282,6 +284,7 @@ def new_job(
     chat_id: int,
     source: str,
     host: str,
+    user_name: str = "",
     source_kind: str = "url",
     local_path: Optional[Path] = None,
 ) -> Job:
@@ -291,6 +294,7 @@ def new_job(
         chat_id=chat_id,
         source=source,
         host=host,
+        user_name=user_name,
         source_kind=source_kind,
         local_path=local_path,
     )

@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from bot import render_final, render_job
+from bot import _can_cancel, render_final, render_job
 from mirror.config import Settings
 from mirror.jobs import new_job
 from mirror.uploaders.base import UploadResult
 
 
 def test_render_running_job():
-    job = new_job(user_id=1, chat_id=2, source="https://example.com/a.zip", host="gofile")
+    job = new_job(
+        user_id=1,
+        chat_id=2,
+        source="https://example.com/a.zip",
+        host="gofile",
+        user_name="Farhad",
+    )
     job.update(status="running", stage="downloading", percent=42.0, detail="1.2 GB / 2.8 GB · 24 MB/s")
     text = render_job(job)
     assert "⬇️" in text
@@ -16,6 +22,9 @@ def test_render_running_job():
     assert "Gofile" in text
     assert "1.2 GB" in text
     assert "24 MB/s" in text
+    assert "Launched by" in text
+    assert 'href="tg://user?id=1"' in text
+    assert "Farhad" in text
 
 
 def test_render_upload_stage_with_speed():
@@ -35,7 +44,13 @@ def test_render_upload_stage_with_speed():
 
 
 def test_render_done_job():
-    job = new_job(user_id=1, chat_id=2, source="https://example.com/a.zip", host="gofile")
+    job = new_job(
+        user_id=1,
+        chat_id=2,
+        source="https://example.com/a.zip",
+        host="gofile",
+        user_name="Farhad",
+    )
     job.update(
         status="done",
         stage="done",
@@ -48,6 +63,36 @@ def test_render_done_job():
     assert "Mirror complete" in text
     assert "https://gofile.io/d/abc" in text
     assert "1.2 KB" in text
+    assert "Launched by" in text
+    assert 'href="tg://user?id=1"' in text
+    assert "Farhad" in text
+
+
+def test_cancel_permissions():
+    settings = Settings(telegram_token="x", allowed_user_ids=frozenset({99}))
+    job = new_job(
+        user_id=1,
+        chat_id=2,
+        source="https://example.com/a.zip",
+        host="gofile",
+        user_name="Launcher",
+    )
+    assert _can_cancel(job, 1, settings)  # launcher
+    assert _can_cancel(job, 99, settings)  # admin
+    assert not _can_cancel(job, 5, settings)  # unrelated user
+
+
+def test_launcher_name_is_escaped():
+    job = new_job(
+        user_id=1,
+        chat_id=2,
+        source="https://example.com/a.zip",
+        host="gofile",
+        user_name="<b>bad</b>",
+    )
+    text = render_job(job)
+    assert "&lt;b&gt;bad&lt;/b&gt;" in text
+    assert "<b>bad</b>" not in text
 
 
 def test_render_failed_job_escapes_html():

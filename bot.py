@@ -131,6 +131,20 @@ def _cancel_keyboard(job_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def _can_cancel(job: Job, user_id: int, settings: Settings) -> bool:
+    """Only the job's launcher and configured admins may cancel it."""
+    return job.user_id == user_id or user_id in settings.allowed_user_ids
+
+
+def _launcher_html(snap: dict) -> str:
+    """Tag the job's launcher with a Telegram mention."""
+    name = str(snap.get("user_name") or f"User {snap['user_id']}")
+    return (
+        f'👤 Launched by <a href="tg://user?id={int(snap["user_id"])}">'
+        f"{html.escape(name)}</a>"
+    )
+
+
 STAGE_STYLES = {
     "queued": ("🕒", "Queued"),
     "resolving": ("🔎", "Resolving link"),
@@ -160,6 +174,8 @@ def render_job(job: Job) -> str:
     if snap["extras"]:
         lines.append(f"<i>➕ {snap['extras']} extra file(s) skipped — largest is uploaded.</i>")
 
+    lines.append(_launcher_html(snap))
+
     footer = [f"📦 {snap['host'].title()}"]
     if snap["file_size"]:
         footer.append(f"💾 {human_size(snap['file_size'])}")
@@ -178,6 +194,7 @@ def render_final(job: Job) -> str:
             "",
             f"📄 {html.escape(snap['file_name'] or 'file')}",
             f"💾 {human_size(snap['file_size'])} · 📦 {html.escape(result.host)}",
+            _launcher_html(snap),
         ]
         if snap["extras"]:
             lines.append(f"<i>➕ {snap['extras']} extra file(s) were skipped.</i>")
@@ -186,12 +203,16 @@ def render_final(job: Job) -> str:
         return "\n".join(lines)
 
     if snap["status"] == "cancelled":
-        return f"⏹️ <b>Cancelled</b> · <code>{snap['id']}</code>"
+        return (
+            f"⏹️ <b>Cancelled</b> · <code>{snap['id']}</code>\n"
+            f"{_launcher_html(snap)}"
+        )
 
     reason = snap["error"] or "Unknown error."
     return (
         f"❌ <b>Mirror failed</b> · <code>{snap['id']}</code>\n"
-        f"<b>Reason:</b> {html.escape(str(reason))}"
+        f"<b>Reason:</b> {html.escape(str(reason))}\n"
+        f"{_launcher_html(snap)}"
     )
 
 
@@ -438,11 +459,17 @@ async def _submit_job(
         await reject(f"⚠️ {html.escape(reason)}")
         return
 
+    user = update.effective_user
     job = new_job(
-        user_id=update.effective_user.id,
+        user_id=user.id,
         chat_id=update.effective_chat.id,
         source=source,
         host=host,
+        user_name=(
+            getattr(user, "full_name", "")
+            or getattr(user, "first_name", "")
+            or f"User {user.id}"
+        ),
         source_kind=source_kind,
         local_path=local_path,
     )
@@ -720,8 +747,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if parts[0] == "cancel" and len(parts) == 2:
         manager: JobManager = context.application.bot_data["manager"]
         job = manager.get(parts[1])
-        if not job or job.user_id != update.effective_user.id:
+        if not job or job.finished:
             await query.answer("Job not found or already finished.", show_alert=True)
+            return
+        user_id = update.effective_user.id
+        if not _can_cancel(job, user_id, settings):
+            await query.answer(
+                "Only the job's launcher or an admin can cancel it.",
+                show_alert=True,
+            )
             return
         job.cancel.cancel()
         await query.answer("Cancelling…")
