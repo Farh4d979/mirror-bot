@@ -454,7 +454,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/gf &lt;link&gt; — upload to Gofile, or reply to a file with /gf\n"
         "/mirror &lt;link&gt; — same as /gf\n"
         "/px &lt;link&gt; — upload to Pixeldrain, or reply to a file with /px "
-        "(requires PIXELDRAIN_API_KEY)\n"
+        "(requires a free Pixeldrain API key)\n"
         "/status — active jobs\n"
         "/cancel — cancel your jobs\n"
         "/id — show your Telegram ID",

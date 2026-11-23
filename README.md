@@ -214,7 +214,7 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 
 **Pixeldrain rejects the API key (`authentication_failed`)** — create a fresh key at `https://pixeldrain.com/user/api_keys` and update the `PIXELDRAIN_API_KEY` secret. Keys are only used on `pixeldrain.com` hosts.
 
-**`/px` says `PIXELDRAIN_API_KEY` is not set** — `/gf` and `/mirror` still work with Gofile. Add the Pixeldrain key as a repository secret to enable `/px`.
+**`/px` says `PIXELDRAIN_API_KEY` is not set** — `/gf` and `/mirror` still work with Gofile. Pixeldrain requires an account key for uploads, but the account is free and allows 10 GB per file: create one at `https://pixeldrain.com/user/api_keys` and add it as the `PIXELDRAIN_API_KEY` repository secret. There is no upload size cap in the bot itself.
 
 **A Gofile share link fails** — the bot reads share links with a temporary guest token, so no account is needed. Password-protected folders are not supported. If Gofile changes its website-token salt, set `GOFILE_WT_SALT` to the current value from `https://gofile.io/js/wt.obf.js`; the default is `12af056dacea0b`.
 

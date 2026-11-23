@@ -180,6 +180,8 @@ def test_pixeldrain_requires_api_key():
     usable, reason = PixeldrainUploader().available()
     assert not usable
     assert "PIXELDRAIN_API_KEY" in reason
+    assert "10 GB" in reason
+    assert "pixeldrain.com/user/api_keys" in reason
 
 
 def test_pixeldrain_upload(tmp_path):

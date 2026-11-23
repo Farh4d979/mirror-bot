@@ -72,7 +72,10 @@ class PixeldrainUploader(Uploader):
         if not self.api_key:
             return (
                 False,
-                "PIXELDRAIN_API_KEY is not set. Add it as a repository secret to use /px.",
+                "PIXELDRAIN_API_KEY is not set. Pixeldrain requires an account API "
+                "key for uploads, but the account is free and allows 10 GB per file. "
+                "Create a key at https://pixeldrain.com/user/api_keys and add it as "
+                "a repository secret to use /px.",
             )
         return True, ""
 
