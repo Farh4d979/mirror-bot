@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from mirror.errors import UploadError
+from mirror.uploaders.base import UploadResult
 from mirror.uploaders.gofile import GofileUploader
 from mirror.uploaders.pixeldrain import PixeldrainUploader
 from mirror.utils import CancelToken
@@ -138,25 +137,43 @@ def test_gofile_guest_refusal_is_not_blamed_on_token(tmp_path):
     assert "GOFILE_TOKEN" not in str(excinfo.value)
 
 
-def test_gofile_guest_upload_over_one_gb_fails_fast():
+def test_gofile_guest_upload_has_no_client_side_size_refusal(tmp_path, monkeypatch):
     class HugePath:
         name = "huge.bin"
 
         def is_file(self):
             return True
 
-        def stat(self):
-            return SimpleNamespace(st_size=1024**3 + 1)
+    uploader = GofileUploader(session=FakeSession(FakeResponse(200, {})))
+    calls = []
 
-        def open(self, mode):
-            raise AssertionError("must not open a file that is too large for guests")
+    def fake_upload_once(path, progress, cancel):
+        calls.append(path)
+        return UploadResult(url="https://gofile.io/d/x", host="Gofile")
 
-    session = FakeSession(FakeResponse(200, {}))
-    with pytest.raises(UploadError, match="1 GB per file"):
-        GofileUploader(session=session).upload(
-            HugePath(), lambda percent, detail: None, CancelToken()
+    monkeypatch.setattr(uploader, "_upload_once", fake_upload_once)
+
+    result = uploader.upload(HugePath(), lambda percent, detail: None, CancelToken())
+
+    assert result.url == "https://gofile.io/d/x"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status_code", [200, 403])
+def test_gofile_limits_error_is_explained(tmp_path, status_code):
+    source = tmp_path / "hello.txt"
+    source.write_text("hello")
+    response = FakeResponse(
+        status_code,
+        {"status": "error-limits", "data": "Account quota exceeded."},
+    )
+    with pytest.raises(UploadError, match="guest 1 GB/file") as excinfo:
+        GofileUploader(session=FakeSession(response)).upload(
+            source, lambda percent, detail: None, CancelToken()
         )
-    assert session.last_url is None
+    message = str(excinfo.value)
+    assert "Account quota exceeded." in message
+    assert "Pixeldrain" in message
 
 
 def test_pixeldrain_requires_api_key():

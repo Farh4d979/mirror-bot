@@ -17,7 +17,6 @@ from .base import ProgressCB, Uploader, UploadResult
 logger = logging.getLogger(__name__)
 
 UPLOAD_URL = "https://upload.gofile.io/uploadfile"
-GOFILE_GUEST_FILE_LIMIT = 1024**3
 
 
 class _Retryable(Exception):
@@ -38,13 +37,6 @@ class GofileUploader(Uploader):
     def upload(self, path: Path, progress: ProgressCB, cancel: CancelToken) -> UploadResult:
         if not path.is_file():
             raise UploadError("The downloaded file disappeared before upload.")
-        size = path.stat().st_size
-        if not self.token and size > GOFILE_GUEST_FILE_LIMIT:
-            raise UploadError(
-                f"Gofile guest uploads are limited to 1 GB per file; this file is "
-                f"{human_size(size)}. Add GOFILE_TOKEN (verified free: 5 GB, Pro: 10 GB) "
-                "or upload it with /px."
-            )
         last_error: Optional[Exception] = None
         for attempt in range(3):
             try:
@@ -92,6 +84,8 @@ class GofileUploader(Uploader):
             raise _Retryable(f"Gofile returned HTTP {response.status_code}")
         if response.status_code in {401, 403}:
             detail = _error_detail(response)
+            if _payload_status(response) == "error-limits":
+                raise UploadError(_limits_message(detail))
             if self.token:
                 raise UploadError(
                     "Gofile rejected the account token. Check GOFILE_TOKEN or remove it "
@@ -112,7 +106,9 @@ class GofileUploader(Uploader):
 
         status = str(payload.get("status", "")).lower()
         if status != "ok":
-            message = _error_detail(payload)
+            message = _payload_message(payload)
+            if status == "error-limits":
+                raise UploadError(_limits_message(message))
             if status in {"error-token", "error-account"}:
                 if self.token:
                     raise UploadError(f"Gofile rejected the account token: {message}")
@@ -145,6 +141,27 @@ def _error_detail(response) -> str:
             return payload
     text = getattr(response, "text", "") or ""
     return " ".join(text.split())[:200] or "no details"
+
+
+def _payload_status(response) -> str:
+    """Return Gofile's status string from a JSON response, if one is present."""
+    if hasattr(response, "json"):
+        try:
+            payload = response.json()
+        except ValueError:
+            return ""
+        if isinstance(payload, dict):
+            return str(payload.get("status", "")).lower()
+    return ""
+
+
+def _limits_message(detail: str) -> str:
+    return (
+        f"Gofile refused the upload: {detail}. Gofile enforces these limits on "
+        "its servers: guest 1 GB/file, verified free 5 GB/file, Pro 10 GB/file. "
+        "Add GOFILE_TOKEN for your plan's limit, upgrade, or use /px "
+        "(Pixeldrain free: 10 GB/file)."
+    )
 
 
 def _payload_message(payload: dict) -> str:

@@ -31,7 +31,7 @@ Telegram link / .torrent / file
 - Magnet links and `.torrent` files through aria2c (DHT enabled, seeding disabled).
 - Files sent directly in Telegram — documents, photos, video, audio, voice notes, animations and stickers — are uploaded to Gofile. Reply with `/px` to send them to Pixeldrain instead. Telegram's cloud Bot API limits bot downloads to 20 MB per attachment.
 - Gofile share links (`gofile.io/d/...`) resolve through Gofile's API using a temporary guest token. Folder links are supported; the bot downloads the largest file or every file in `MULTI_FILE_MODE=zip`.
-- Gofile guest uploads work with no account. An optional `GOFILE_TOKEN` uses your account.
+- Gofile guest uploads work with no account. An optional `GOFILE_TOKEN` uses your account. The bot does not reject a file by size on its own; Gofile's server enforces the plan limits.
 - Pixeldrain uploads (`/px`) use your Pixeldrain API key, with the free plan allowing 10 GB per file and Pro allowing 100 GB per file.
 - Pixeldrain file links (`pixeldrain.com/u/...`) are downloaded through Pixeldrain's API. When `PIXELDRAIN_API_KEY` is set, the bot authenticates the download so a Pro/Prepaid account uses its own transfer quota instead of the shared free per-IP quota.
 - Progress bars, cancel buttons, per-user job limits, size limits and timeouts.
@@ -205,6 +205,8 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 **A file sent in Telegram is rejected as too large** — Telegram's cloud Bot API only lets bots download attachments up to 20 MB. Send a direct link to the file instead; the bot can then mirror it up to the disk and Gofile limits (or `MAX_FILE_SIZE` if you set one).
 
 **Gofile says the token is rejected** — remove `GOFILE_TOKEN` to use guest uploads, or create a fresh token from your Gofile profile.
+
+**Gofile refuses a large upload (`error-limits`)** — Gofile enforces its limits per account on the server: guest 1 GB/file, verified free 5 GB/file, Pro 10 GB/file. The bot sends the file and reports Gofile's answer instead of pre-rejecting it. Changing IP, clearing browser data, or using a VPN does not change account limits. Add `GOFILE_TOKEN` for your plan's limit, upgrade, or use `/px` (Pixeldrain free: 10 GB/file).
 
 **Gofile is rate-limiting downloads (HTTP 429)** — the bot serializes Gofile downloads, retries 429/5xx responses with backoff, and reduces aria2 connections for Gofile. If it still fails, set `MAX_CONCURRENT_JOBS=1`, add `GOFILE_TOKEN` (signed-in accounts get better limits), or wait a few minutes.
 
