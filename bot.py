@@ -145,6 +145,14 @@ def _launcher_html(snap: dict) -> str:
     )
 
 
+def _duration_text(snap: dict) -> str:
+    started = snap.get("started_at")
+    if not started:
+        return ""
+    finished = snap.get("finished_at") or time.time()
+    return human_eta(max(0.0, finished - started))
+
+
 STAGE_STYLES = {
     "queued": ("🕒", "Queued"),
     "resolving": ("🔎", "Resolving link"),
@@ -187,15 +195,18 @@ def render_job(job: Job) -> str:
 
 def render_final(job: Job) -> str:
     snap = job.snapshot()
+    duration = _duration_text(snap)
     if snap["status"] == "done" and snap["result"]:
         result = snap["result"]
         lines = [
-            "✅ <b>Mirror complete</b>",
+            f"✅ <b>Job complete</b> · <code>{snap['id']}</code>",
             "",
             f"📄 {html.escape(snap['file_name'] or 'file')}",
             f"💾 {human_size(snap['file_size'])} · 📦 {html.escape(result.host)}",
-            _launcher_html(snap),
         ]
+        if duration:
+            lines.append(f"⏱ Took {duration}")
+        lines.append(_launcher_html(snap))
         if snap["extras"]:
             lines.append(f"<i>➕ {snap['extras']} extra file(s) were skipped.</i>")
         url = html.escape(result.url, quote=True)
@@ -203,17 +214,21 @@ def render_final(job: Job) -> str:
         return "\n".join(lines)
 
     if snap["status"] == "cancelled":
-        return (
-            f"⏹️ <b>Cancelled</b> · <code>{snap['id']}</code>\n"
-            f"{_launcher_html(snap)}"
-        )
+        lines = [f"⏹️ <b>Job cancelled</b> · <code>{snap['id']}</code>"]
+        if duration:
+            lines.append(f"⏱ Stopped after {duration}")
+        lines.append(_launcher_html(snap))
+        return "\n".join(lines)
 
     reason = snap["error"] or "Unknown error."
-    return (
-        f"❌ <b>Mirror failed</b> · <code>{snap['id']}</code>\n"
-        f"<b>Reason:</b> {html.escape(str(reason))}\n"
-        f"{_launcher_html(snap)}"
-    )
+    lines = [
+        f"❌ <b>Job failed</b> · <code>{snap['id']}</code>",
+        f"<b>Reason:</b> {html.escape(str(reason))}",
+    ]
+    if duration:
+        lines.append(f"⏱ Failed after {duration}")
+    lines.append(_launcher_html(snap))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------- helpers
@@ -407,24 +422,48 @@ async def _report_job(
             break
 
     await asyncio.sleep(0.4)
-    final = render_final(job)
+    await _deliver_final(context, job, message, render_final(job))
+
+
+async def _deliver_final(
+    context: ContextTypes.DEFAULT_TYPE,
+    job: Job,
+    message: Message,
+    final: str,
+) -> None:
+    """Delete the live progress message and post a clean completion message."""
     try:
-        await message.edit_text(
+        await message.delete()
+    except TelegramError:
+        logger.debug(
+            "Could not delete the progress message for job %s; editing it instead",
+            job.id,
+            exc_info=True,
+        )
+        try:
+            await message.edit_text(
+                final,
+                parse_mode=ParseMode.HTML,
+                reply_markup=None,
+                disable_web_page_preview=True,
+            )
+            return
+        except TelegramError:
+            logger.debug(
+                "Could not edit the progress message for job %s; sending a new message",
+                job.id,
+                exc_info=True,
+            )
+
+    try:
+        await context.bot.send_message(
+            job.chat_id,
             final,
             parse_mode=ParseMode.HTML,
-            reply_markup=None,
             disable_web_page_preview=True,
         )
     except TelegramError:
-        try:
-            await context.bot.send_message(
-                job.chat_id,
-                final,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-            )
-        except TelegramError:
-            logger.exception("Could not deliver final status for job %s", job.id)
+        logger.exception("Could not deliver final status for job %s", job.id)
 
 
 async def _submit_job(
