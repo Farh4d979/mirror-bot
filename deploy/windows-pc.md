@@ -1,10 +1,15 @@
 # Run the bot on your Windows PC
 
-This is the recommended free setup. The PC is the normal Telegram poller, but in
-split mode it does **not** download or upload anything. Each job is dispatched
-to a one-shot GitHub Actions worker. The PC tracks the run id for `/status` and
-`/cancel`, while the worker edits the Telegram progress message and posts the
-final link.
+This is the recommended free setup when you want the PC to own the Telegram
+poller. The PC is the normal Telegram poller, but in split mode it does **not**
+download or upload anything. Each job is dispatched to a one-shot GitHub
+Actions worker. The PC tracks the run id for `/status` and `/cancel`, while the
+worker edits the Telegram progress message and posts the final link.
+
+If you do not want a PC running at all, use the
+[Cloudflare Worker controller](../README.md#cloudflare-worker-controller-no-pc)
+instead. It serves the Telegram webhook and dispatches the same `job.yml`
+workers.
 
 `bot.yml` remains an **on-demand fallback poller**: the PC starts one run when
 it hands over, and takes the bot back when it starts again. There is no schedule

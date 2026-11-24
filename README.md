@@ -39,6 +39,7 @@ Telegram link / replied file
 - Private DMs are restricted to `ALLOWED_USER_IDS`; groups work while at least one of those users is a member. Channels are ignored.
 - Runs on a Windows PC, Docker, or a small VPS. Telegram long polling means no open ports or domain are needed.
 - **Split mode:** the PC can act as a Telegram-only controller and send every download/upload job to a one-shot GitHub Actions worker. The PC stays at roughly 60-100 MB of RAM; the runner does the heavy work.
+- **Cloudflare mode:** a Worker webhook can replace the PC entirely. It handles commands, authorization, job tracking and cancellation; GitHub Actions still does the downloads and uploads. See [Cloudflare Worker controller](#cloudflare-worker-controller-no-pc).
 - The PC runner can also hand the Telegram poller to one GitHub Actions run when it exits, and takes the bot back (cancelling that run) when it starts again. See [deploy/windows-pc.md](deploy/windows-pc.md).
 
 ## Recommended: PC controller + GitHub Actions workers
@@ -82,6 +83,165 @@ If you have an always-on Linux box, the included Docker image is a good
 alternative. [deploy/oracle-cloud.md](deploy/oracle-cloud.md) describes Oracle
 Cloud's Always Free VM, but Oracle now requires card verification and may stop
 idle instances, so use it only if that suits you.
+
+## Cloudflare Worker controller (no PC)
+
+The Cloudflare Worker is a third mode: Telegram calls a Worker webhook, and the
+Worker dispatches the same one-shot `job.yml` runs. No PC, Docker, VPS, or open
+port is needed. Cloudflare's free plan handles the command traffic; every
+download, partition extraction, and upload still runs on GitHub Actions.
+
+### How it works
+
+- Telegram sends `POST /telegram` with the `X-Telegram-Bot-Api-Secret-Token`
+  header. The Worker rejects requests without the matching secret.
+- A Durable Object stores active jobs, deduplicates Telegram update IDs, and
+  caches the "is an owner still in this group?" check.
+- The Worker parses the same commands as the PC bot, encrypts the same Fernet
+  payload, and calls the GitHub `workflow_dispatch` API with
+  `return_run_details: true`.
+- The Actions worker edits the Telegram progress card and posts the final link.
+  It still needs the `TELEGRAM_BOT_TOKEN` and `REMOTE_JOB_KEY` repository
+  secrets.
+- A one-minute cron trigger checks active runs. It posts the cancellation card
+  after a cancel, and a failure card only when the progress card still exists,
+  so a normal worker failure is not reported twice.
+
+### Setup
+
+Requirements: a Cloudflare account, Node.js 20+ (22 recommended), Wrangler, and
+a GitHub token that can dispatch and cancel Actions runs in this repository.
+The free Cloudflare plan is enough for a personal bot. If the 10 ms CPU limit
+per invocation becomes a problem, Workers Paid is $5/month; network time does
+not count toward that limit.
+
+1. **Deploy and upload the Worker secrets.**
+
+   ```powershell
+   cd cloudflare
+   npm ci
+   npx wrangler login
+   cd ..
+   powershell -ExecutionPolicy Bypass -File scripts\configure-cloudflare.ps1
+   ```
+
+   The script reads the existing `.env`, creates the gitignored
+   `cloudflare\.dev.vars`, deploys the Worker, uploads the secrets with
+   `wrangler secret bulk`, saves `CLOUDFLARE_WORKER_URL` in `.env`, and checks
+   `/health`. This first version is already set up for
+   `Farh4d979/mirror-bot`; for a fork, change `ACTIONS_REPO` in
+   `cloudflare\wrangler.toml` before deploying.
+
+   The GitHub token comes from `$env:GITHUB_TOKEN`, `GITHUB_TOKEN` in `.env`, or
+   `gh auth token`. A fine-grained token needs **Actions: read and write** on
+   the repository. The script never prints a secret value.
+
+2. **Check the Worker before touching Telegram.**
+
+   ```powershell
+   Invoke-RestMethod https://YOUR-WORKER.workers.dev/health | ConvertTo-Json
+   ```
+
+   Wait for `"ok": true` and `"ready": true`. `missing` lists secret names that
+   were not uploaded; it never lists their values. `/health` is public, but it
+   exposes only readiness and the active job count.
+
+3. **Cut Telegram over.** This stops and disables the `MirrorBot` scheduled
+   task, then calls `setWebhook` with `drop_pending_updates=true` so old
+   commands are not replayed:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\cloudflare-webhook.ps1 -Mode on
+   ```
+
+   `-Mode on` refuses to continue unless `/health` is ready. Send `/id`, then
+   test a small link such as
+   `/gf https://proof.ovh.net/files/1Mb.dat`, and press the cancel button on
+   another job.
+
+4. **Check or change the webhook.**
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\cloudflare-webhook.ps1 -Mode status
+   ```
+
+5. **Go back to the PC poller.**
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\cloudflare-webhook.ps1 -Mode off -StartPcBot
+   ```
+
+   This deletes the webhook, re-enables the scheduled task, and starts it. You
+   can also switch back manually: delete the webhook in BotFather or with
+   `deleteWebhook`, then run `Start-ScheduledTask -TaskName MirrorBot`.
+
+### Worker secrets and settings
+
+| Worker secret | Where it comes from |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | `.env`; must be the same bot as the Actions secret |
+| `TELEGRAM_WEBHOOK_SECRET` | Generated by `configure-cloudflare.ps1`; also used by `setWebhook` |
+| `GITHUB_TOKEN` | `gh auth token`, `$env:GITHUB_TOKEN`, or `GITHUB_TOKEN` in `.env` |
+| `REMOTE_JOB_KEY` | `.env`; must match the GitHub Actions secret exactly |
+| `ALLOWED_USER_IDS` | `.env`; owner IDs for DMs and trusted groups |
+| `GOFILE_TOKEN` | Optional, from `.env` |
+| `PIXELDRAIN_API_KEY` | Optional, required for `/px` |
+
+Non-secret Worker settings live in `cloudflare\wrangler.toml`: `ACTIONS_REPO`,
+`ACTIONS_REF`, `REMOTE_WORKFLOW`, `MAX_FILE_SIZE`, `JOB_TIMEOUT`,
+`MULTI_FILE_MODE`, and `YTDLP_FORMAT`. They are sent inside the encrypted job
+payload, so the Actions worker uses the Worker's values rather than its own
+repository variables.
+
+The Worker does not read `.env` at runtime. `.env` is only the local input for
+the deploy script; `cloudflare\.dev.vars` is for `wrangler dev` and is
+gitignored.
+
+### Cloudflare limitations
+
+- **Only one update consumer.** The webhook and PC long polling cannot both
+  run. `-Mode on` stops and disables `MirrorBot`, so a later logon does not
+  start a second poller. Do not start `scripts\run-local.cmd` while the webhook
+  is active.
+- **Webhook secret is required.** Telegram includes it on every update; the
+  Worker returns 403 without it. The Worker URL itself is public, like any
+  webhook endpoint.
+- **Free plan limits.** 100,000 requests/day and 10 ms CPU per invocation are
+  normally plenty, because the Worker only parses commands and makes API calls.
+  Cron runs once a minute. Exceeding the CPU limit requires Workers Paid.
+- **Commands are acknowledged after processing.** If GitHub or Telegram is
+  slow, Telegram retries the update. The Durable Object deduplicates update IDs
+  and the job reservation, so a retry does not dispatch the same job twice.
+- **Replied files are still limited to 20 MB.** Telegram's Bot API download
+  limit applies to the Actions worker too; send a direct link for larger files.
+- **The runner limits do not change.** Expect a 1–3 minute runner start, a
+  ~14 GB disk, a 6-hour cap, public Actions logs in a public repo, and
+  datacenter-IP blocks. The GitHub Terms of Service risk is the same as in
+  split mode.
+- **No local queue survives a Cloudflare outage.** Active jobs are tracked in
+  the Durable Object; finished jobs are removed when the cron monitor sees
+  them. The Actions worker still posts its own final card if the Worker is
+  briefly unavailable.
+
+### Worker development and tests
+
+```powershell
+cd cloudflare
+npm test
+npm run typecheck
+npx wrangler dev
+```
+
+`npm test` includes cross-language fixtures: the Worker decrypts a token
+generated by Python's `cryptography.fernet.Fernet`, and the Python test suite
+covers the Actions-side payload. The Worker uses WebCrypto, so no Node-only
+crypto package is needed at runtime. CI runs the Python and Cloudflare test
+jobs from `.github/workflows/tests.yml`.
+
+For local webhook testing, `wrangler dev` loads `cloudflare\.dev.vars`. Send
+updates with curl and the `X-Telegram-Bot-Api-Secret-Token` header; do not point
+the real Telegram webhook at a dev tunnel while the production webhook is
+active.
 
 ## GitHub Actions setup
 
@@ -380,6 +540,19 @@ pytest -q
 
 The tests cover URL/filename handling, the HTML download-button resolver, Gofile and Pixeldrain resolution and uploads with mocked HTTP responses, command parsing, the downloader's header and file-collection logic, encrypted remote payloads, run tracking/cancellation, and the Actions worker's payload validation and Telegram card delivery.
 
+The Cloudflare Worker has its own suite:
+
+```bash
+cd cloudflare
+npm ci
+npm test
+npm run typecheck
+```
+
+It covers Fernet compatibility with Python, command parsing, group and owner
+authorization, encrypted dispatch payloads, the job store, cancellation, and the
+cron monitor's final cards.
+
 ## Project layout
 
 ```
@@ -399,9 +572,21 @@ mirror/
     gofile.py              Gofile upload fleet API
     pixeldrain.py          Pixeldrain raw PUT uploader
 .github/workflows/
-  job.yml                  One-shot worker dispatched by the PC
+  job.yml                  One-shot worker dispatched by the controller
   bot.yml                  On-demand GitHub Actions fallback poller
-  tests.yml                Unit tests
+  tests.yml                Python and Cloudflare tests
+cloudflare/
+  wrangler.toml            Worker routes, Durable Object, cron and settings
+  src/
+    index.ts               Webhook and cron entry points
+    handlers.ts            Commands, authorization, dispatch and cancel
+    fernet.ts              Fernet-compatible WebCrypto payload encryption
+    github.ts              Workflow dispatch, cancel and run status
+    store.ts               Durable Object job store and client
+    refresh.ts             Cron monitor for cancelled/failed runs
+    render.ts              Telegram cards
+    utils.ts               URL, filename and dump helpers
+  test/                    Vitest suite
 deploy/
   windows-pc.md            Recommended Windows PC + workers guide
   oracle-cloud.md          Optional Oracle Cloud Always Free guide
@@ -409,6 +594,8 @@ scripts/
   setup-windows.ps1        Installs Windows tools and Python dependencies
   configure-env.ps1        Writes the bot token and owner IDs to .env
   configure-remote.ps1     Generates REMOTE_JOB_KEY and uploads the secret
+  configure-cloudflare.ps1 Deploys the Worker and uploads its secrets
+  cloudflare-webhook.ps1   Switches Telegram between the Worker and the PC
   run-local.cmd            Starts the PC runner and enables handoff
   install-startup-task.ps1 Starts the PC runner at logon
 docker-compose.yml         Alternative Docker deployment

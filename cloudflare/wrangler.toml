@@ -1,0 +1,25 @@
+name = "mirror-bot"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+
+[durable_objects]
+bindings = [
+  { name = "JOBS", class_name = "JobStore" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["JobStore"]
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+ACTIONS_REPO = "Farh4d979/mirror-bot"
+ACTIONS_REF = "main"
+REMOTE_WORKFLOW = "job.yml"
+MAX_FILE_SIZE = "0"
+JOB_TIMEOUT = "7200"
+MULTI_FILE_MODE = "largest"
+YTDLP_FORMAT = "bv*+ba/b"
+BOT_USERNAME = "Mirror979Bot"

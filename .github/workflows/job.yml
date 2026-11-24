@@ -1,17 +1,18 @@
 name: Mirror Job Worker
 
-# One-shot worker started by the PC controller for a single mirror/dump job.
-# GitHub only sees an encrypted payload. The worker edits the Telegram message
-# created by the controller and posts the final link itself.
+# One-shot worker started by the Telegram controller (PC or Cloudflare Worker)
+# for a single mirror/dump job. GitHub only sees an encrypted payload. The
+# worker edits the Telegram message created by the controller and posts the
+# final link itself.
 
 on:
   workflow_dispatch:
     inputs:
       payload:
-        description: "Encrypted job payload (created by the PC controller)"
+        description: "Encrypted job payload (created by the Telegram controller)"
         required: true
       job_id:
-        description: "Random job id from the PC controller"
+        description: "Random job id from the Telegram controller"
         required: true
 
 run-name: "Mirror job ${{ github.event.inputs.job_id }}"
