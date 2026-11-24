@@ -764,6 +764,11 @@ def _payload_partitions(
             "payload-dumper-go could not list any partitions in this file. "
             "It may not be a valid Android OTA payload."
         )
+    logger.info(
+        "Payload lists %d partitions: %s",
+        len(partitions),
+        ", ".join(sorted(partitions)),
+    )
     return partitions
 
 
@@ -863,6 +868,7 @@ def _run_process(
     except OSError as exc:
         raise DumpError(f"Could not start {label}: {exc}") from exc
 
+    lines: list[str] = []
     tail: list[str] = []
     failure: list[MirrorError] = []
     stop = threading.Event()
@@ -886,6 +892,7 @@ def _run_process(
             line = raw_line.strip()
             if not line:
                 continue
+            lines.append(line)
             tail.append(line)
             if len(tail) > 40:
                 del tail[:-40]
@@ -914,7 +921,9 @@ def _run_process(
     if code != 0:
         details = " | ".join(tail[-4:]) or f"no details from {label}"
         raise DumpError(f"{label} failed (exit code {code}): {details[:600]}")
-    return tail
+    # Return every line, not just the tail: partition listings can easily
+    # exceed 40 entries and the old tail limit silently hid the first ones.
+    return lines
 
 
 def _terminate(process: subprocess.Popen) -> None:
@@ -1285,10 +1294,10 @@ def _missing_message(
     names = ", ".join(requested)
     lines = [f"None of the requested partitions were found: {names}."]
     if available:
-        shown = ", ".join(available[:30])
-        if len(available) > 30:
-            shown += f", … ({len(available)} total)"
-        lines.append(f"Available partitions: {shown}.")
+        lines.append(
+            f"Available partitions ({len(available)}): "
+            f"{', '.join(available)}."
+        )
     else:
         lines.append(
             "I could not find a payload.bin, super.img, or matching .img file "

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import struct
+import sys
 import tarfile
 import zipfile
 
@@ -392,6 +393,51 @@ def test_payload_missing_partition_reports_available(tmp_path, monkeypatch):
 
     assert "vendor" in str(excinfo.value)
     assert "boot" in str(excinfo.value)
+
+
+def test_process_output_is_not_capped_for_long_partition_lists():
+    script = (
+        "for index in range(65):\n"
+        "    print(f'partition_{index}:{index}')\n"
+    )
+    lines = dumper._run_process(
+        [sys.executable, "-c", script],
+        label="test partition listing",
+        cancel=CancelToken(),
+        progress=lambda percent, detail: None,
+        interval=10.0,
+    )
+
+    assert len(lines) == 65
+    assert lines[0] == "partition_0:0"
+    assert lines[-1] == "partition_64:64"
+
+
+def test_payload_listing_keeps_every_partition(tmp_path, monkeypatch):
+    lines = ["system_ext:2048"]
+    lines.extend(f"partition_{index}:{index}" for index in range(65))
+    monkeypatch.setattr(dumper, "_run_process", lambda *args, **kwargs: lines)
+
+    partitions = dumper._payload_partitions(
+        "payload-dumper-go",
+        tmp_path / "payload.bin",
+        cancel=CancelToken(),
+        progress=lambda percent, detail: None,
+    )
+
+    assert len(partitions) == 66
+    assert partitions["system_ext"] == 2048 * 1024
+    assert partitions["partition_64"] == 64 * 1024
+
+
+def test_missing_message_shows_all_available_partitions():
+    names = [f"partition_{index:02d}" for index in range(45)]
+    message = dumper._missing_message(["system_ext"], names, "", "")
+
+    assert "None of the requested partitions were found" in message
+    assert all(name in message for name in names)
+    assert "total" not in message.lower()
+    assert "…" not in message
 
 
 def test_parse_dump_args_forms():
