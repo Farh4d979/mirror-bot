@@ -110,6 +110,45 @@ def test_mirror_starts_gofile_job(monkeypatch):
     assert not update.effective_message.replies
 
 
+def test_gf_dump_parses_comma_separated_partitions(monkeypatch):
+    update, started = run_command(
+        monkeypatch,
+        "gf",
+        ["https://example.com/ota.zip", "-dump", "boot,vendor"],
+    )
+    assert len(started) == 1
+    assert started[0].dump_partitions == ("boot", "vendor")
+    assert not update.effective_message.replies
+
+
+def test_gf_dump_parses_space_separated_partitions(monkeypatch):
+    update, started = run_command(
+        monkeypatch,
+        "gf",
+        ["-dump", "boot", "vendor", "https://example.com/ota.zip"],
+    )
+    assert len(started) == 1
+    assert started[0].dump_partitions == ("boot", "vendor")
+
+
+def test_gf_dump_without_names_shows_usage(monkeypatch):
+    update, started = run_command(
+        monkeypatch, "gf", ["https://example.com/ota.zip", "-dump"]
+    )
+    assert not started
+    assert "-dump" in update.effective_message.replies[0]
+
+
+def test_gf_dump_rejects_unsafe_partition_name(monkeypatch):
+    update, started = run_command(
+        monkeypatch,
+        "gf",
+        ["https://example.com/ota.zip", "-dump", "../../boot"],
+    )
+    assert not started
+    assert "valid partition name" in update.effective_message.replies[0]
+
+
 def test_command_without_link_shows_usage(monkeypatch):
     update, started = run_command(monkeypatch, "gf", [])
     assert not started

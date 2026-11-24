@@ -76,6 +76,72 @@ def test_render_done_job():
     assert "Farhad" in text
 
 
+def test_render_dump_job_lists_each_partition_and_missing():
+    job = new_job(
+        user_id=1,
+        chat_id=2,
+        source="https://example.com/ota.zip",
+        host="gofile",
+        user_name="Farhad",
+        dump_partitions=("boot", "vendor"),
+    )
+    results = (
+        UploadResult(
+            url="https://gofile.io/d/boot",
+            host="Gofile",
+            file_name="boot.img",
+            size=1024,
+        ),
+        UploadResult(
+            url="https://gofile.io/d/vendor",
+            host="Gofile",
+            file_name="vendor_a.img",
+            size=2048,
+        ),
+    )
+    job.update(
+        status="done",
+        stage="done",
+        percent=100.0,
+        results=results,
+        result=results[0],
+        missing_partitions=("system",),
+        file_name="boot.img, vendor_a.img",
+        file_size=3072,
+        started_at=100.0,
+        finished_at=130.0,
+    )
+    text = render_final(job)
+    assert "Partition dump complete" in text
+    assert "https://gofile.io/d/boot" in text
+    assert "https://gofile.io/d/vendor" in text
+    assert "boot.img" in text
+    assert "vendor_a.img" in text
+    assert "Not found" in text
+    assert "system" in text
+    assert "Took 30s" in text
+
+
+def test_render_extracting_stage():
+    job = new_job(
+        user_id=1,
+        chat_id=2,
+        source="https://example.com/ota.zip",
+        host="gofile",
+        dump_partitions=("boot", "vendor"),
+    )
+    job.update(
+        status="running",
+        stage="extracting",
+        percent=50.0,
+        detail="Extracting vendor.img · 1.0 GB / 2.0 GB",
+    )
+    text = render_job(job)
+    assert "🧩" in text
+    assert "Extracting partitions" in text
+    assert "vendor.img" in text
+
+
 def test_cancel_permissions():
     settings = Settings(telegram_token="x", allowed_user_ids=frozenset({99}))
     job = new_job(

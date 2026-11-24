@@ -4,6 +4,7 @@ import pytest
 
 import mirror.jobs as jobs_module
 from mirror.config import Settings
+from mirror.dumper import ExtractionResult
 from mirror.errors import DownloadError, FileTooLarge, NoFallbackResolutionError
 from mirror.jobs import JobManager, new_job
 from mirror.uploaders.base import UploadResult
@@ -100,3 +101,65 @@ def test_telegram_file_missing_on_disk_fails(tmp_path, monkeypatch):
 
     with pytest.raises(DownloadError, match="no longer available"):
         manager._pipeline(job)
+
+
+def test_dump_pipeline_uploads_each_partition(tmp_path, monkeypatch):
+    settings = Settings(telegram_token="test", download_dir=tmp_path)
+    manager = JobManager(settings)
+    source = tmp_path / "uploads" / "token" / "ota.zip"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"PK\x03\x04")
+
+    boot = tmp_path / "dump" / "boot.img"
+    vendor = tmp_path / "dump" / "vendor_a.img"
+    boot.parent.mkdir()
+    boot.write_bytes(b"B" * 100)
+    vendor.write_bytes(b"V" * 200)
+
+    uploaded = []
+
+    class FakeUploader:
+        name = "gofile"
+
+        def available(self):
+            return True, ""
+
+        def upload(self, path, progress, cancel):
+            uploaded.append(path.name)
+            progress(100.0, f"{path.stat().st_size} B / {path.stat().st_size} B")
+            return UploadResult(url=f"https://gofile.io/d/{path.stem}", host="Gofile")
+
+    def fake_extract(root, partitions, output_dir, **kwargs):
+        assert root == source
+        assert partitions == ("boot", "vendor")
+        return ExtractionResult(
+            files=[boot, vendor],
+            found=["boot", "vendor"],
+            missing=["system"],
+            sources=["super.img"],
+        )
+
+    monkeypatch.setattr(jobs_module, "get_uploader", lambda host, cfg: FakeUploader())
+    monkeypatch.setattr(jobs_module, "extract_partitions", fake_extract)
+
+    job = new_job(
+        user_id=1,
+        chat_id=1,
+        source="ota.zip",
+        host="gofile",
+        source_kind="telegram_file",
+        local_path=source,
+        dump_partitions=("boot", "vendor"),
+    )
+    manager._pipeline(job)
+
+    assert uploaded == ["boot.img", "vendor_a.img"]
+    assert [result.file_name for result in job.results] == ["boot.img", "vendor_a.img"]
+    assert [result.url for result in job.results] == [
+        "https://gofile.io/d/boot",
+        "https://gofile.io/d/vendor_a",
+    ]
+    assert job.result is job.results[0]
+    assert job.missing_partitions == ("system",)
+    assert job.file_size == 300
+    assert not source.exists()

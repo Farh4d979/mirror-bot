@@ -11,7 +11,7 @@ import shutil
 import signal
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from telegram import (
     BotCommand,
@@ -34,6 +34,8 @@ from telegram.ext import (
 )
 
 from mirror.config import Settings, load_settings
+from mirror.dumper import normalize_partitions, parse_dump_args
+from mirror.errors import DumpError
 from mirror.jobs import Job, JobManager, new_job
 from mirror.state import load_state, save_state
 from mirror.uploaders import get_uploader
@@ -157,6 +159,7 @@ STAGE_STYLES = {
     "queued": ("🕒", "Queued"),
     "resolving": ("🔎", "Resolving link"),
     "downloading": ("⬇️", "Downloading"),
+    "extracting": ("🧩", "Extracting partitions"),
     "uploading": ("⬆️", "Uploading"),
     "done": ("✅", "Done"),
     "failed": ("❌", "Failed"),
@@ -197,6 +200,34 @@ def render_final(job: Job) -> str:
     snap = job.snapshot()
     duration = _duration_text(snap)
     if snap["status"] == "done" and snap["result"]:
+        results = list(snap["results"]) or [snap["result"]]
+        if snap["dump_partitions"]:
+            requested = ", ".join(snap["dump_partitions"])
+            lines = [
+                f"✅ <b>Partition dump complete</b> · <code>{snap['id']}</code>",
+                "",
+                f"🗂 Requested: <code>{html.escape(requested)}</code>",
+                f"📦 {html.escape(results[0].host)} · 💾 {human_size(snap['file_size'])}",
+            ]
+            if duration:
+                lines.append(f"⏱ Took {duration}")
+            lines.append(_launcher_html(snap))
+            if snap["missing_partitions"]:
+                missing = ", ".join(snap["missing_partitions"])
+                lines.append(f"⚠️ <b>Not found:</b> <code>{html.escape(missing)}</code>")
+            for result in results:
+                name = html.escape(result.file_name or "image")
+                size = human_size(result.size) if result.size else "?"
+                url = html.escape(result.url, quote=True)
+                lines.extend(
+                    [
+                        "",
+                        f"📄 <b>{name}</b> · 💾 {size}",
+                        f'🔗 <a href="{url}">{url}</a>',
+                    ]
+                )
+            return "\n".join(lines)
+
         result = snap["result"]
         lines = [
             f"✅ <b>Job complete</b> · <code>{snap['id']}</code>",
@@ -475,6 +506,7 @@ async def _submit_job(
     local_path: Optional[Path] = None,
     status_message: Optional[Message] = None,
     host: str = "gofile",
+    dump_partitions: Sequence[str] = (),
 ) -> None:
     settings: Settings = context.application.bot_data["settings"]
     message = update.effective_message
@@ -511,6 +543,7 @@ async def _submit_job(
         ),
         source_kind=source_kind,
         local_path=local_path,
+        dump_partitions=dump_partitions,
     )
     await _start_job(context, job, status_message)
 
@@ -537,7 +570,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "(requires a free Pixeldrain API key)\n"
         "/status — active jobs\n"
         "/cancel — cancel your jobs\n"
-        "/id — show your Telegram ID",
+        "/id — show your Telegram ID\n\n"
+        "<b>Android partition dump</b>\n"
+        "/gf &lt;link&gt; -dump boot,vendor — download an OTA zip / fastboot ROM, "
+        "extract only those partition images from payload.bin or super.img, and "
+        "upload them. Use <code>-dump</code> with spaces too: "
+        "<code>-dump boot vendor</code>.",
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
@@ -574,31 +612,68 @@ async def _cmd_link(
         await _deny(update, settings)
         return
 
+    raw_args = list(context.args or [])
     source = None
-    for arg in context.args or []:
+    source_index: Optional[int] = None
+    for index, arg in enumerate(raw_args):
         found = extract_url(arg)
         if found:
             source = found
+            source_index = index
             break
+
+    remaining = [
+        arg for index, arg in enumerate(raw_args) if index != source_index
+    ]
+    _cleaned, dump_values, dump_requested = parse_dump_args(remaining)
+    try:
+        dump_partitions = normalize_partitions(dump_values)
+    except DumpError as exc:
+        await update.effective_message.reply_text(
+            html.escape(str(exc)), parse_mode=ParseMode.HTML
+        )
+        return
+
+    if dump_requested and not dump_partitions:
+        await update.effective_message.reply_text(
+            f"Add partition names after <code>-dump</code>, e.g. "
+            f"<code>/{command} &lt;link&gt; -dump boot,vendor</code>.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
 
     replied = getattr(update.effective_message, "reply_to_message", None)
     if not source and replied is not None:
         attachment = _message_attachment(replied)
         if attachment is not None:
-            await _mirror_attachment(update, context, replied, attachment, host=host)
+            await _mirror_attachment(
+                update,
+                context,
+                replied,
+                attachment,
+                host=host,
+                dump_partitions=dump_partitions,
+            )
             return
         if replied.text:
             source = extract_url(replied.text)
 
     if not source:
         await update.effective_message.reply_text(
-            f"Usage: <code>/{command} &lt;link&gt;</code>\n"
-            f"Or reply to a file or link with <code>/{command}</code>.",
+            f"Usage: <code>/{command} &lt;link&gt; [-dump boot,vendor]</code>\n"
+            f"Or reply to a file or link with "
+            f"<code>/{command} [-dump boot,vendor]</code>.",
             parse_mode=ParseMode.HTML,
         )
         return
 
-    await _submit_job(update, context, source=source, host=host)
+    await _submit_job(
+        update,
+        context,
+        source=source,
+        host=host,
+        dump_partitions=dump_partitions,
+    )
 
 
 async def cmd_mirror(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -677,6 +752,7 @@ async def _mirror_attachment(
     attachment,
     *,
     host: str = "gofile",
+    dump_partitions: Sequence[str] = (),
 ) -> None:
     """Download a Telegram attachment and submit it as an upload job."""
     settings: Settings = context.application.bot_data["settings"]
@@ -716,6 +792,7 @@ async def _mirror_attachment(
                 local_path=path,
                 status_message=status,
                 host=host,
+                dump_partitions=dump_partitions,
             )
             return
 
@@ -749,6 +826,7 @@ async def _mirror_attachment(
         local_path=path,
         status_message=status,
         host=host,
+        dump_partitions=dump_partitions,
     )
 
 

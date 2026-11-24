@@ -17,6 +17,8 @@ class UploadResult:
     url: str
     host: str
     detail: str = ""
+    file_name: str = ""
+    size: int = 0
 
 
 class Uploader(ABC):

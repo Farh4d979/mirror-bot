@@ -28,6 +28,7 @@ Telegram link / .torrent / file
 - Video sites through yt-dlp (YouTube, Vimeo, TikTok, X/Twitter, Reddit, etc.).
 - Image galleries through gallery-dl (Pixiv, Danbooru, Gelbooru, Imgur albums, DeviantArt, Flickr, ArtStation, Tumblr, Reddit image posts, and many more).
 - Public MEGA file and folder links through megatools (`megadl`).
+- Android partition dumps: `/gf <link> -dump boot,vendor` downloads an OTA zip or fastboot ROM, extracts only the requested images from `payload.bin` or `super.img`, and uploads each image separately.
 - Magnet links and `.torrent` files through aria2c (DHT enabled, seeding disabled).
 - Files sent directly in Telegram — documents, photos, video, audio, voice notes, animations and stickers — are uploaded to Gofile. Reply with `/px` to send them to Pixeldrain instead. Telegram's cloud Bot API limits bot downloads to 20 MB per attachment.
 - Gofile share links (`gofile.io/d/...`) resolve through Gofile's API using a temporary guest token. Folder links are supported; the bot downloads the largest file or every file in `MULTI_FILE_MODE=zip`.
@@ -92,7 +93,7 @@ The automatic hand-off makes Actions effectively continuous, but it is still bes
 
 ## Local setup
 
-Requirements: Python 3.10+ (3.12 recommended), [aria2](https://aria2.github.io/) and ffmpeg. Without aria2, direct HTTP downloads still work through Python, but torrents/magnets do not. MEGA links additionally need megatools (`megadl`). gallery-dl and yt-dlp are installed from `requirements.txt`.
+Requirements: Python 3.10+ (3.12 recommended), [aria2](https://aria2.github.io/) and ffmpeg. Without aria2, direct HTTP downloads still work through Python, but torrents/magnets do not. MEGA links additionally need megatools (`megadl`). `-dump` extraction needs [payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases) and `xz`; gallery-dl and yt-dlp are installed from `requirements.txt`.
 
 ```bash
 python -m venv .venv
@@ -134,7 +135,7 @@ docker run -d --name mirror-bot \
   mirror-bot
 ```
 
-The image includes aria2, ffmpeg, megatools and gallery-dl. Downloads and state live in `/data`.
+The image includes aria2, ffmpeg, megatools, payload-dumper-go and gallery-dl. Downloads and state live in `/data`.
 
 ## Configuration
 
@@ -154,6 +155,7 @@ The image includes aria2, ffmpeg, megatools and gallery-dl. Downloads and state 
 | `DOWNLOAD_DIR` | `downloads` | Temporary download directory |
 | `STATE_FILE` | `.state/telegram.json` | Telegram offset state |
 | `ARIA2C_PATH` | `aria2c` | Path to the aria2c binary |
+| `PAYLOAD_DUMPER_PATH` | `payload-dumper-go` | Path to payload-dumper-go, used by `-dump` |
 | `ALLOW_PRIVATE_URLS` | `0` | **Dangerous.** Allows localhost/private IP links. Keep off in production. |
 | `LOG_LEVEL` | `INFO` | Python log level |
 
@@ -163,6 +165,7 @@ The image includes aria2, ffmpeg, megatools and gallery-dl. Downloads and state 
 |---|---|
 | `/start`, `/help` | Usage |
 | `/gf <link>` | Upload a link to Gofile, or reply to a file with `/gf` |
+| `/gf <link> -dump boot,vendor` | Extract only those Android partitions from `payload.bin` or `super.img`, then upload each one |
 | `/mirror <link>` | Same as `/gf` |
 | `/px <link>` | Upload a link to Pixeldrain, or reply to a file with `/px` (requires `PIXELDRAIN_API_KEY`) |
 | `/status` | Active jobs |
@@ -172,6 +175,24 @@ The image includes aria2, ffmpeg, megatools and gallery-dl. Downloads and state 
 You can also send a link, a magnet link, a `.torrent` file, or any file directly. Files sent in Telegram are uploaded to Gofile; cloud bots can download attachments up to 20 MB. To mirror a file you already sent, reply to it with `/gf`, `/mirror`, or `/px`.
 
 In groups, use commands such as `/gf@YourBot <link>`. Plain links are ignored there so the bot does not reply to every message. Private chats are owner-only; a group is enabled while at least one `ALLOWED_USER_IDS` member is in it.
+
+### Android partition dumps (`-dump`)
+
+`/gf <link> -dump boot,vendor` works like a normal mirror job, but instead of uploading the downloaded archive it looks inside it for Android partition images and uploads only the requested ones. The syntax also accepts spaces and `.img` suffixes: `-dump boot vendor`, `-dump boot.img,vendor.img`.
+
+Supported sources inside the download:
+
+| Source | How it is handled |
+|---|---|
+| OTA `.zip` containing `payload.bin` (full or incremental) | `payload-dumper-go` extracts only the selected partitions |
+| Raw `payload.bin` | Same as above |
+| Fastboot ROM `.zip` / `.tar` / `.tar.gz` / `.tgz` containing `super.img` | The LP metadata is parsed and only the requested extents are copied (sparse `super.img` works too) |
+| Raw or already-extracted `boot.img`, `vendor.img`, … | Used directly |
+| ZIP/TAR containing raw partition images | Only the matching `.img` members are extracted |
+
+If a logical partition exists in both slots, `-dump vendor` picks `vendor_a` (slot A); ask for `vendor_a,vendor_b` to get both. File names in the result are the actual partition names, so `vendor` may produce `vendor_a.img`. Partitions that were requested but do not exist are listed in the final message; if none exist, the job fails with the available partition names. `7z`/`RAR`, `.lz4` members and Samsung `.tar.md5` firmware are not supported — extract those first.
+
+Extraction needs free disk space for the requested images, not for the whole `super.img`, but the downloaded ROM is kept until the job finishes. payload-dumper-go is installed by the GitHub Actions workflow and the Docker image. For a local run, download it from [ssut/payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases), put it on `PATH` (or set `PAYLOAD_DUMPER_PATH`), and install `xz`.
 
 ## Supported links
 

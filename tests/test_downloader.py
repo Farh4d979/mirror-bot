@@ -354,6 +354,60 @@ def test_download_parts_largest_mode(tmp_path, monkeypatch):
     assert result.extras == 1
 
 
+def test_download_parts_keep_all_skips_largest_pruning(tmp_path, monkeypatch):
+    downloader = Downloader(
+        make_settings(tmp_path), CancelToken(), keep_all=True
+    )
+    downloaded = []
+
+    def fake_http(link, dest, progress):
+        downloaded.append(link.filename)
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / link.filename
+        path.write_bytes(b"x" * (link.size or 0))
+        return DownloadResult(path=path, size=link.size or 0)
+
+    monkeypatch.setattr(downloader, "_http", fake_http)
+    parts = [
+        ResolvedLink(url="https://example.com/small", filename="small.txt", size=5),
+        ResolvedLink(url="https://example.com/large", filename="large.bin", size=100),
+    ]
+    link = ResolvedLink(url=parts[1].url, filename="large.bin", parts=parts)
+    result = downloader._download_parts(link, tmp_path / "out", lambda percent, detail: None)
+
+    assert downloaded == ["small.txt", "large.bin"]
+    assert result.path.name == "large.bin"
+    assert (tmp_path / "out" / "part-001" / "small.txt").exists()
+    assert (tmp_path / "out" / "part-002" / "large.bin").exists()
+
+
+def test_download_parts_keep_all_skips_zip_archiving(tmp_path, monkeypatch):
+    downloader = Downloader(
+        make_settings(tmp_path, multi_file_mode="zip"),
+        CancelToken(),
+        keep_all=True,
+    )
+
+    def fake_http(link, dest, progress):
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / link.filename
+        path.write_bytes(b"x" * (link.size or 0))
+        return DownloadResult(path=path, size=link.size or 0)
+
+    monkeypatch.setattr(downloader, "_http", fake_http)
+    parts = [
+        ResolvedLink(url="https://example.com/a", filename="a.txt", size=5),
+        ResolvedLink(url="https://example.com/b", filename="b.bin", size=10),
+    ]
+    link = ResolvedLink(url=parts[0].url, filename="a.txt", parts=parts)
+    result = downloader._download_parts(link, tmp_path / "out", lambda percent, detail: None)
+
+    assert result.path.suffix == ".bin"
+    assert not list((tmp_path / "out").glob("*.zip"))
+    assert (tmp_path / "out" / "part-001" / "a.txt").exists()
+    assert (tmp_path / "out" / "part-002" / "b.bin").exists()
+
+
 def test_download_parts_zip_mode_downloads_all(tmp_path, monkeypatch):
     downloader = Downloader(
         make_settings(tmp_path, multi_file_mode="zip"), CancelToken()

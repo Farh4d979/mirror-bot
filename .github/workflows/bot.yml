@@ -54,7 +54,11 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 ffmpeg megatools
+          sudo apt-get install -y -qq aria2 ffmpeg megatools xz-utils
+          curl -fsSL https://github.com/ssut/payload-dumper-go/releases/download/2.1.0/payload-dumper-go_2.1.0_linux_amd64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin payload-dumper-go
+          sudo chmod +x /usr/local/bin/payload-dumper-go
+          command -v payload-dumper-go
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt

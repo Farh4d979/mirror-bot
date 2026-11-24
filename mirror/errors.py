@@ -41,3 +41,7 @@ class JobTimeout(MirrorError):
 
 class FileTooLarge(MirrorError):
     """The file is bigger than the configured limit."""
+
+
+class DumpError(MirrorError):
+    """An Android partition could not be found or extracted."""

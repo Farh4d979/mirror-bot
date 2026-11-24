@@ -58,6 +58,7 @@ class Settings:
     multi_file_mode: str = "largest"
     ytdlp_format: str = "bv*+ba/b"
     aria2c_path: str = "aria2c"
+    payload_dumper_path: str = "payload-dumper-go"
     allow_private_urls: bool = False
     log_level: str = "INFO"
 
@@ -93,6 +94,8 @@ def load_settings() -> Settings:
         multi_file_mode=multi_file_mode,
         ytdlp_format=os.getenv("YTDLP_FORMAT", "bv*+ba/b").strip() or "bv*+ba/b",
         aria2c_path=os.getenv("ARIA2C_PATH", "aria2c").strip() or "aria2c",
+        payload_dumper_path=os.getenv("PAYLOAD_DUMPER_PATH", "payload-dumper-go").strip()
+        or "payload-dumper-go",
         allow_private_urls=_env_bool("ALLOW_PRIVATE_URLS", False),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
     )

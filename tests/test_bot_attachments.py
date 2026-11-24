@@ -223,6 +223,23 @@ def test_gf_reply_to_file_submits_telegram_file(tmp_path, monkeypatch):
     assert submitted["status_message"] is command.statuses[0]
 
 
+def test_gf_reply_to_file_with_dump_passes_partitions(tmp_path, monkeypatch):
+    replied = FakeAttachmentMessage(FakeDocument("ota.zip", b"PK\x03\x04"))
+    command = FakeCommandMessage(replied)
+    update = make_command_update(command)
+    context = make_context(tmp_path, args=["-dump", "boot,vendor"])
+    submitted = {}
+
+    async def fake_submit(update, context, **kwargs):
+        submitted.update(kwargs)
+
+    monkeypatch.setattr(bot, "_submit_job", fake_submit)
+    asyncio.run(bot._cmd_link(update, context, command="gf"))
+
+    assert submitted["source_kind"] == "telegram_file"
+    assert submitted["dump_partitions"] == ("boot", "vendor")
+
+
 def test_mirror_reply_to_text_link_submits_link(tmp_path, monkeypatch):
     replied = fake_message(text="https://example.com/file.zip")
     command = FakeCommandMessage(replied)

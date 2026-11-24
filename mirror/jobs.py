@@ -8,12 +8,13 @@ import secrets
 import shutil
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 from .config import Settings
 from .downloader import Downloader
+from .dumper import extract_partitions
 from .errors import (
     DownloadError,
     FileTooLarge,
@@ -50,6 +51,9 @@ class Job:
     file_name: Optional[str] = None
     file_size: Optional[int] = None
     extras: int = 0
+    dump_partitions: tuple[str, ...] = ()
+    missing_partitions: tuple[str, ...] = ()
+    results: tuple[UploadResult, ...] = ()
     result: Optional[UploadResult] = None
     error: Optional[str] = None
     cancel: CancelToken = field(default_factory=CancelToken)
@@ -79,6 +83,9 @@ class Job:
                 "file_name": self.file_name,
                 "file_size": self.file_size,
                 "extras": self.extras,
+                "dump_partitions": self.dump_partitions,
+                "missing_partitions": self.missing_partitions,
+                "results": self.results,
                 "result": self.result,
                 "error": self.error,
                 "created_at": self.created_at,
@@ -169,6 +176,8 @@ class JobManager:
         job.cancel.check()
         workdir = safe_workdir(self.settings.download_dir, job.id)
         try:
+            dump_requested = bool(job.dump_partitions)
+
             if job.source_kind == "telegram_file":
                 if not job.local_path or not job.local_path.exists():
                     raise DownloadError("The Telegram file is no longer available.")
@@ -182,6 +191,7 @@ class JobManager:
                         f"The file is {human_size(file_size)}, above the "
                         f"{human_size(self.settings.max_file_size)} limit."
                     )
+                dump_root = job.local_path
             else:
                 if job.source_kind == "torrent_file":
                     if not job.local_path or not job.local_path.exists():
@@ -217,7 +227,9 @@ class JobManager:
                     )
 
                 job.update(stage="downloading", percent=0.0, detail="Starting download…")
-                downloader = Downloader(self.settings, job.cancel)
+                downloader = Downloader(
+                    self.settings, job.cancel, keep_all=dump_requested
+                )
                 downloaded = downloader.download(
                     original_url=job.source,
                     link=link,
@@ -237,8 +249,38 @@ class JobManager:
                 file_path = downloaded.path
                 file_size = downloaded.size
                 extras = downloaded.extras
+                dump_root = workdir / "files"
 
-            job.update(file_name=file_path.name, file_size=file_size, extras=extras)
+            if dump_requested:
+                job.update(
+                    stage="extracting",
+                    percent=None,
+                    detail="Looking for payload.bin or super.img…",
+                )
+                dumped = extract_partitions(
+                    dump_root,
+                    job.dump_partitions,
+                    workdir / "dump",
+                    settings=self.settings,
+                    progress=lambda percent, detail: job.update(
+                        stage="extracting", percent=percent, detail=detail
+                    ),
+                    cancel=job.cancel,
+                )
+                job.update(missing_partitions=tuple(dumped.missing))
+                if not dumped.files:
+                    raise DownloadError("No partition images were extracted.")
+                upload_files = list(dumped.files)
+                total_size = sum(path.stat().st_size for path in upload_files)
+                job.update(
+                    file_name=", ".join(path.name for path in upload_files),
+                    file_size=total_size,
+                    extras=0,
+                )
+            else:
+                upload_files = [file_path]
+                total_size = file_size
+                job.update(file_name=file_path.name, file_size=file_size, extras=extras)
 
             uploader = get_uploader(job.host, self.settings)
             usable, reason = uploader.available()
@@ -248,16 +290,51 @@ class JobManager:
             job.update(
                 stage="uploading",
                 percent=0.0,
-                detail=f"Uploading {human_size(file_size)} to {uploader.name.title()}…",
+                detail=f"Uploading {human_size(total_size)} to {uploader.name.title()}…",
             )
-            result = uploader.upload(
-                file_path,
-                progress=lambda percent, detail: job.update(
-                    stage="uploading", percent=percent, detail=detail
-                ),
-                cancel=job.cancel,
-            )
-            job.update(result=result)
+
+            results: list[UploadResult] = []
+            total_files = len(upload_files)
+            for index, path in enumerate(upload_files, 1):
+                file_bytes = path.stat().st_size
+                if file_bytes == 0:
+                    raise DownloadError(f"{path.name} is empty.")
+                job.update(
+                    stage="uploading",
+                    percent=((index - 1) / total_files) * 100.0,
+                    detail=(
+                        f"Uploading {path.name} ({index}/{total_files}) · "
+                        f"{human_size(file_bytes)} to {uploader.name.title()}…"
+                        if total_files > 1
+                        else f"Uploading {human_size(file_bytes)} to "
+                        f"{uploader.name.title()}…"
+                    ),
+                )
+
+                def on_upload(
+                    percent: Optional[float],
+                    detail: str,
+                    *,
+                    index: int = index,
+                    path: Path = path,
+                ) -> None:
+                    fraction = (percent or 0.0) / 100.0
+                    overall = ((index - 1) + fraction) / total_files * 100.0
+                    prefix = f"{path.name} · " if total_files > 1 else ""
+                    job.update(
+                        stage="uploading",
+                        percent=overall,
+                        detail=f"{prefix}{detail}" if detail else path.name,
+                    )
+
+                result = uploader.upload(
+                    path, progress=on_upload, cancel=job.cancel
+                )
+                results.append(
+                    replace(result, file_name=path.name, size=file_bytes)
+                )
+
+            job.update(result=results[0], results=tuple(results))
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
             if job.local_path and job.source_kind in {"torrent_file", "telegram_file"}:
@@ -287,6 +364,7 @@ def new_job(
     user_name: str = "",
     source_kind: str = "url",
     local_path: Optional[Path] = None,
+    dump_partitions: Sequence[str] = (),
 ) -> Job:
     return Job(
         id=secrets.token_hex(4),
@@ -297,4 +375,5 @@ def new_job(
         user_name=user_name,
         source_kind=source_kind,
         local_path=local_path,
+        dump_partitions=tuple(dump_partitions),
     )

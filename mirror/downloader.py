@@ -121,10 +121,14 @@ class DownloadResult:
 
 
 class Downloader:
-    def __init__(self, settings: Settings, cancel: CancelToken) -> None:
+    def __init__(
+        self, settings: Settings, cancel: CancelToken, *, keep_all: bool = False
+    ) -> None:
         self.settings = settings
         self.cancel = cancel
         self.max_size = settings.max_file_size
+        # Partition dumping needs every downloaded file, not just the largest.
+        self.keep_all = keep_all
 
     # ------------------------------------------------------------------ public
     def download(
@@ -217,7 +221,7 @@ class Downloader:
     ) -> DownloadResult:
         parts = list(link.parts)
         skipped = 0
-        if self.settings.multi_file_mode == "largest":
+        if self.settings.multi_file_mode == "largest" and not self.keep_all:
             parts.sort(key=lambda item: item.size or 0, reverse=True)
             skipped = max(0, len(parts) - 1)
             parts = parts[:1]
@@ -790,7 +794,7 @@ class Downloader:
         largest = files[0]
         extras = len(files) - 1
 
-        if extras and self.settings.multi_file_mode == "zip":
+        if extras and self.settings.multi_file_mode == "zip" and not self.keep_all:
             archive_base = dest.parent / sanitize_filename(dest.name, "download")
             archive = Path(shutil.make_archive(str(archive_base), "zip", root_dir=dest))
             shutil.rmtree(dest, ignore_errors=True)
