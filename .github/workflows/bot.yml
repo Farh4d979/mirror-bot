@@ -55,8 +55,15 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq aria2 ffmpeg megatools xz-utils
-          curl -fsSL https://github.com/ssut/payload-dumper-go/releases/download/2.1.0/payload-dumper-go_2.1.0_linux_amd64.tar.gz \
-            | sudo tar -xz -C /usr/local/bin payload-dumper-go
+
+      - name: Install payload-dumper-go
+        run: |
+          set -euo pipefail
+          curl --connect-timeout 15 --max-time 180 -fsSL \
+            -o "$RUNNER_TEMP/payload-dumper-go.tar.gz" \
+            https://github.com/ssut/payload-dumper-go/releases/download/2.1.0/payload-dumper-go_2.1.0_linux_amd64.tar.gz
+          sudo tar -xzf "$RUNNER_TEMP/payload-dumper-go.tar.gz" \
+            -C /usr/local/bin payload-dumper-go
           sudo chmod +x /usr/local/bin/payload-dumper-go
           command -v payload-dumper-go
 
