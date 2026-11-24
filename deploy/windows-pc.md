@@ -57,7 +57,18 @@ Open a new terminal after it finishes so the updated PATH is visible.
 
 ## 2. Configure `.env`
 
-Edit `.env` and set at least:
+The easiest way is the setup prompt. It hides the token while you type and
+writes `.env` for you:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\configure-env.ps1
+```
+
+It asks for the BotFather token, then for your Telegram user ID (message
+[@userinfobot](https://t.me/userinfobot) to get it). Re-run it whenever the
+token changes.
+
+Or edit `.env` yourself and set at least:
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=your-botfather-token

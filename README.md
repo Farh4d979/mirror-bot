@@ -51,7 +51,7 @@ Follow [deploy/windows-pc.md](deploy/windows-pc.md). The short version:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
-# edit .env: TELEGRAM_BOT_TOKEN, ALLOWED_USER_IDS
+powershell -ExecutionPolicy Bypass -File scripts\configure-env.ps1
 gh auth login
 scripts\run-local.cmd
 ```
@@ -127,7 +127,8 @@ payload-dumper-go, creates `.venv`, and installs the Python dependencies:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
-# edit .env and set TELEGRAM_BOT_TOKEN and ALLOWED_USER_IDS
+# fill in .env with the hidden prompt (or edit .env in an editor)
+powershell -ExecutionPolicy Bypass -File scripts\configure-env.ps1
 gh auth login
 scripts\run-local.cmd
 ```
@@ -369,6 +370,7 @@ deploy/
   oracle-cloud.md          Optional Oracle Cloud Always Free guide
 scripts/
   setup-windows.ps1        Installs Windows tools and Python dependencies
+  configure-env.ps1        Writes the bot token and owner IDs to .env
   run-local.cmd            Starts the PC runner and enables handoff
   install-startup-task.ps1 Starts the PC runner at logon
 docker-compose.yml         Alternative Docker deployment

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..config import Settings
-from .base import Uploader, UploadResult
+from .base import Uploader, UploadResult as UploadResult
 from .gofile import GofileUploader
 from .pixeldrain import PixeldrainUploader
 
