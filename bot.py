@@ -46,15 +46,11 @@ from mirror.handoff import (
     take_over,
 )
 from mirror.jobs import Job, JobManager, new_job
+from mirror.remote import RemoteJobManager, RemoteRecord
+from mirror.render import STAGE_STYLES, render_final, render_job
 from mirror.state import load_state, save_state
 from mirror.uploaders import get_uploader
-from mirror.utils import (
-    extract_url,
-    human_eta,
-    human_size,
-    progress_bar,
-    sanitize_filename,
-)
+from mirror.utils import extract_url, human_size, sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -145,130 +141,6 @@ def _cancel_keyboard(job_id: str) -> InlineKeyboardMarkup:
 def _can_cancel(job: Job, user_id: int, settings: Settings) -> bool:
     """Only the job's launcher and configured admins may cancel it."""
     return job.user_id == user_id or user_id in settings.allowed_user_ids
-
-
-def _launcher_html(snap: dict) -> str:
-    """Tag the job's launcher with a Telegram mention."""
-    name = str(snap.get("user_name") or f"User {snap['user_id']}")
-    return (
-        f'👤 Launched by <a href="tg://user?id={int(snap["user_id"])}">'
-        f"{html.escape(name)}</a>"
-    )
-
-
-def _duration_text(snap: dict) -> str:
-    started = snap.get("started_at")
-    if not started:
-        return ""
-    finished = snap.get("finished_at") or time.time()
-    return human_eta(max(0.0, finished - started))
-
-
-STAGE_STYLES = {
-    "queued": ("🕒", "Queued"),
-    "resolving": ("🔎", "Resolving link"),
-    "downloading": ("⬇️", "Downloading"),
-    "extracting": ("🧩", "Extracting partitions"),
-    "uploading": ("⬆️", "Uploading"),
-    "done": ("✅", "Done"),
-    "failed": ("❌", "Failed"),
-    "cancelled": ("⏹️", "Cancelled"),
-}
-
-
-def render_job(job: Job) -> str:
-    snap = job.snapshot()
-    icon, title = STAGE_STYLES.get(snap["stage"], ("⚙️", snap["stage"].title()))
-    lines = [f"{icon} <b>{title}</b> · <code>{snap['id']}</code>"]
-
-    if snap["status"] == "queued":
-        lines.append("<i>Waiting for a free worker…</i>")
-
-    percent = snap["percent"]
-    if percent is not None:
-        lines.append(f"<code>{progress_bar(percent, width=16)}</code> <b>{percent:.0f}%</b>")
-
-    if snap["detail"]:
-        lines.append(f"<i>{html.escape(str(snap['detail']))}</i>")
-
-    if snap["extras"]:
-        lines.append(f"<i>➕ {snap['extras']} extra file(s) skipped — largest is uploaded.</i>")
-
-    lines.append(_launcher_html(snap))
-
-    footer = [f"📦 {snap['host'].title()}"]
-    if snap["file_size"]:
-        footer.append(f"💾 {human_size(snap['file_size'])}")
-    if snap["status"] == "running" and snap["started_at"]:
-        footer.append(f"⏱ {human_eta(max(0.0, time.time() - snap['started_at']))}")
-    lines.append(" · ".join(footer))
-    return "\n".join(lines)
-
-
-def render_final(job: Job) -> str:
-    snap = job.snapshot()
-    duration = _duration_text(snap)
-    if snap["status"] == "done" and snap["result"]:
-        results = list(snap["results"]) or [snap["result"]]
-        if snap["dump_partitions"]:
-            requested = ", ".join(snap["dump_partitions"])
-            lines = [
-                f"✅ <b>Partition dump complete</b> · <code>{snap['id']}</code>",
-                "",
-                f"🗂 Requested: <code>{html.escape(requested)}</code>",
-                f"📦 {html.escape(results[0].host)} · 💾 {human_size(snap['file_size'])}",
-            ]
-            if duration:
-                lines.append(f"⏱ Took {duration}")
-            lines.append(_launcher_html(snap))
-            if snap["missing_partitions"]:
-                missing = ", ".join(snap["missing_partitions"])
-                lines.append(f"⚠️ <b>Not found:</b> <code>{html.escape(missing)}</code>")
-            for result in results:
-                name = html.escape(result.file_name or "image")
-                size = human_size(result.size) if result.size else "?"
-                url = html.escape(result.url, quote=True)
-                lines.extend(
-                    [
-                        "",
-                        f"📄 <b>{name}</b> · 💾 {size}",
-                        f'🔗 <a href="{url}">{url}</a>',
-                    ]
-                )
-            return "\n".join(lines)
-
-        result = snap["result"]
-        lines = [
-            f"✅ <b>Job complete</b> · <code>{snap['id']}</code>",
-            "",
-            f"📄 {html.escape(snap['file_name'] or 'file')}",
-            f"💾 {human_size(snap['file_size'])} · 📦 {html.escape(result.host)}",
-        ]
-        if duration:
-            lines.append(f"⏱ Took {duration}")
-        lines.append(_launcher_html(snap))
-        if snap["extras"]:
-            lines.append(f"<i>➕ {snap['extras']} extra file(s) were skipped.</i>")
-        url = html.escape(result.url, quote=True)
-        lines.extend(["", f'🔗 <a href="{url}">{url}</a>'])
-        return "\n".join(lines)
-
-    if snap["status"] == "cancelled":
-        lines = [f"⏹️ <b>Job cancelled</b> · <code>{snap['id']}</code>"]
-        if duration:
-            lines.append(f"⏱ Stopped after {duration}")
-        lines.append(_launcher_html(snap))
-        return "\n".join(lines)
-
-    reason = snap["error"] or "Unknown error."
-    lines = [
-        f"❌ <b>Job failed</b> · <code>{snap['id']}</code>",
-        f"<b>Reason:</b> {html.escape(str(reason))}",
-    ]
-    if duration:
-        lines.append(f"⏱ Failed after {duration}")
-    lines.append(_launcher_html(snap))
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------- helpers
@@ -381,6 +253,221 @@ async def _save_telegram_file(
     return path
 
 
+def _remote_manager(context: ContextTypes.DEFAULT_TYPE) -> Optional[RemoteJobManager]:
+    return context.application.bot_data.get("remote")
+
+
+async def _start_remote_job(
+    context: ContextTypes.DEFAULT_TYPE,
+    remote: RemoteJobManager,
+    job: Job,
+    message: Optional[Message],
+) -> None:
+    """Create the progress card, then dispatch the work to GitHub Actions."""
+    job.update(
+        status="running",
+        stage="remote",
+        started_at=time.time(),
+        detail="Starting a GitHub Actions runner…",
+    )
+    text = render_job(job)
+    status_message = message
+    try:
+        if status_message is None:
+            status_message = await context.bot.send_message(
+                job.chat_id,
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_cancel_keyboard(job.id),
+            )
+        else:
+            await status_message.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_cancel_keyboard(job.id),
+            )
+    except TelegramError:
+        logger.warning("Could not create the remote job status message", exc_info=True)
+        try:
+            status_message = await context.bot.send_message(
+                job.chat_id,
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_cancel_keyboard(job.id),
+            )
+        except TelegramError:
+            logger.exception("Could not send the remote job status message")
+            _discard_upload(job.local_path)
+            return
+
+    message_id = int(getattr(status_message, "message_id", 0) or 0)
+    if message_id <= 0:
+        logger.error("The Telegram status message has no id; not dispatching job %s", job.id)
+        _discard_upload(job.local_path)
+        return
+
+    try:
+        await asyncio.to_thread(
+            remote.dispatch,
+            job,
+            message_id=message_id,
+        )
+    except Exception as exc:
+        reason = str(exc) or type(exc).__name__
+        logger.error("Could not dispatch job %s to GitHub Actions: %s", job.id, reason)
+        job.update(
+            status="failed",
+            stage="failed",
+            error=f"Could not start GitHub Actions: {reason}",
+            finished_at=time.time(),
+        )
+        _discard_upload(job.local_path)
+        await _edit_remote_card(
+            context.bot,
+            job.chat_id,
+            message_id,
+            render_final(job),
+            keyboard=None,
+        )
+        return
+
+    await _edit_remote_card(
+        context.bot,
+        job.chat_id,
+        message_id,
+        render_job(job),
+        keyboard=_cancel_keyboard(job.id),
+    )
+
+
+async def _edit_remote_card(
+    bot,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    *,
+    keyboard,
+) -> None:
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            logger.debug("Remote status edit failed: %s", exc)
+    except TelegramError:
+        logger.debug("Remote status message is no longer editable", exc_info=True)
+
+
+REMOTE_FAILURE_CONCLUSIONS = {"failure", "timed_out", "startup_failure"}
+
+
+async def _deliver_remote_failure(bot, record: RemoteRecord) -> None:
+    """Finalize a failed run when its worker never posted a card.
+
+    A normal worker failure deletes the progress message and sends its own
+    detailed card, so ``delete_message`` reports "not found" and we leave it
+    alone.  If the worker died before that (bad secret, runner shutdown, failed
+    dependency install), the still-existing progress card is replaced here.
+    """
+    job = record.job
+    if not record.message_id:
+        return
+    try:
+        deleted = await bot.delete_message(job.chat_id, record.message_id)
+    except BadRequest as exc:
+        if "not found" in str(exc).lower():
+            return
+        logger.debug(
+            "Could not remove the failed remote card for job %s", job.id, exc_info=True
+        )
+        return
+    except TelegramError:
+        logger.debug(
+            "Could not remove the failed remote card for job %s", job.id, exc_info=True
+        )
+        return
+    if not deleted:
+        return
+
+    job.update(
+        status="failed",
+        stage="failed",
+        error="GitHub Actions stopped before the worker could report details.",
+        finished_at=time.time(),
+    )
+    text = render_final(job)
+    if record.run_url:
+        url = html.escape(record.run_url, quote=True)
+        text += f'\n\n🔗 <a href="{url}">Actions run</a>'
+    try:
+        await bot.send_message(
+            job.chat_id,
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except TelegramError:
+        logger.exception("Could not deliver the failed card for job %s", job.id)
+
+
+async def _deliver_remote_cancelled(bot, record: RemoteRecord) -> None:
+    """Post the final cancelled card after GitHub finishes stopping a run."""
+    job = record.job
+    job.update(
+        status="cancelled",
+        stage="cancelled",
+        detail="Cancelled.",
+        finished_at=time.time(),
+    )
+    final = render_final(job)
+
+    deleted = False
+    if record.message_id:
+        try:
+            await bot.delete_message(job.chat_id, record.message_id)
+            deleted = True
+        except TelegramError:
+            logger.debug(
+                "Could not delete the remote progress message for job %s",
+                job.id,
+                exc_info=True,
+            )
+
+    if not deleted and record.message_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=job.chat_id,
+                message_id=record.message_id,
+                text=final,
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([]),
+                disable_web_page_preview=True,
+            )
+            return
+        except TelegramError:
+            logger.debug(
+                "Could not edit the remote progress message for job %s",
+                job.id,
+                exc_info=True,
+            )
+
+    try:
+        await bot.send_message(
+            job.chat_id,
+            final,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except TelegramError:
+        logger.exception("Could not deliver the cancelled card for job %s", job.id)
+
+
 async def _start_job(
     context: ContextTypes.DEFAULT_TYPE,
     job: Job,
@@ -396,6 +483,11 @@ async def _start_job(
             except TelegramError:
                 pass
         await context.bot.send_message(job.chat_id, text)
+        return
+
+    remote = _remote_manager(context)
+    if remote is not None:
+        await _start_remote_job(context, remote, job, message)
         return
 
     manager: JobManager = context.application.bot_data["manager"]
@@ -513,12 +605,21 @@ async def _submit_job(
     source: str,
     source_kind: str = "url",
     local_path: Optional[Path] = None,
+    telegram_file_id: Optional[str] = None,
+    file_name: Optional[str] = None,
+    file_size: Optional[int] = None,
     status_message: Optional[Message] = None,
     host: str = "gofile",
     dump_partitions: Sequence[str] = (),
 ) -> None:
     settings: Settings = context.application.bot_data["settings"]
     message = update.effective_message
+    remote = _remote_manager(context)
+    if remote is not None and local_path is not None:
+        # Remote workers download Telegram attachments themselves; do not keep
+        # a second copy on the PC controller.
+        _discard_upload(local_path)
+        local_path = None
 
     async def reject(text: str) -> None:
         _discard_upload(local_path)
@@ -534,10 +635,14 @@ async def _submit_job(
         await reject("The bot is finishing its current run. Send the file again in a few minutes.")
         return
 
-    usable, reason = get_uploader(host, settings).available()
-    if not usable:
-        await reject(f"⚠️ {html.escape(reason)}")
-        return
+    if remote is None:
+        # The PC owns local uploads. A remote worker uses the credentials in
+        # the encrypted payload or its repository secrets, so the controller
+        # cannot reliably check them here.
+        usable, reason = get_uploader(host, settings).available()
+        if not usable:
+            await reject(f"⚠️ {html.escape(reason)}")
+            return
 
     user = update.effective_user
     job = new_job(
@@ -552,8 +657,10 @@ async def _submit_job(
         ),
         source_kind=source_kind,
         local_path=local_path,
+        telegram_file_id=telegram_file_id,
         dump_partitions=dump_partitions,
     )
+    job.update(file_name=file_name, file_size=file_size)
     await _start_job(context, job, status_message)
 
 
@@ -566,8 +673,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "<b>Mirror bot</b>\n\n"
         "Send me a link, a magnet link, a <code>.torrent</code> file, or any file. "
-        "I download it and upload it to Gofile or Pixeldrain, then reply with the public link.\n\n"
-        "Files sent directly in Telegram are uploaded too. Telegram bots can "
+        + (
+            "A GitHub Actions worker downloads it and uploads it to Gofile or "
+            "Pixeldrain, then replies with the public link. This PC only handles "
+            "Telegram commands.\n\n"
+            if settings.remote_jobs
+            else "I download it and upload it to Gofile or Pixeldrain, then reply "
+            "with the public link.\n\n"
+        )
+        + "Files sent directly in Telegram are uploaded too. Telegram bots can "
         "download attachments up to 20 MB; send a link for anything larger. "
         "You can also reply to a file with /gf or /px.\n\n"
         "Any file type, Gofile share links, pages with a download button, video sites, "
@@ -729,12 +843,39 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not _authorized(update, settings):
         await _deny(update, settings)
         return
+
+    remote = _remote_manager(context)
+    if remote is not None:
+        records = remote.records_for(update.effective_user.id)
+        count = 0
+        for record in records:
+            if await asyncio.to_thread(remote.cancel_job, record.job.id):
+                count += 1
+                await _mark_remote_cancelling(context.bot, record)
+        if count:
+            await update.effective_message.reply_text(f"Cancelling {count} job(s)…")
+        else:
+            await update.effective_message.reply_text("You have no active jobs.")
+        return
+
     manager: JobManager = context.application.bot_data["manager"]
     count = manager.cancel_user(update.effective_user.id)
     if count:
         await update.effective_message.reply_text(f"Cancelling {count} job(s)…")
     else:
         await update.effective_message.reply_text("You have no active jobs.")
+
+
+async def _mark_remote_cancelling(bot, record: RemoteRecord) -> None:
+    if record.message_id <= 0:
+        return
+    await _edit_remote_card(
+        bot,
+        record.job.chat_id,
+        record.message_id,
+        render_job(record.job),
+        keyboard=InlineKeyboardMarkup([]),
+    )
 
 
 async def cmd_handoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -814,8 +955,9 @@ async def _mirror_attachment(
     host: str = "gofile",
     dump_partitions: Sequence[str] = (),
 ) -> None:
-    """Download a Telegram attachment and submit it as an upload job."""
+    """Submit a Telegram attachment, locally or to a GitHub Actions worker."""
     settings: Settings = context.application.bot_data["settings"]
+    remote = _remote_manager(context)
     message = update.effective_message
     if message is None:
         return
@@ -835,6 +977,25 @@ async def _mirror_attachment(
                 )
                 return
             filename = sanitize_filename(name, "file.torrent")
+            file_id = getattr(document, "file_id", None)
+            if remote is not None:
+                if not file_id:
+                    await message.reply_text(
+                        "Telegram did not provide a file id for that .torrent file."
+                    )
+                    return
+                await _submit_job(
+                    update,
+                    context,
+                    source=filename,
+                    source_kind="torrent_file",
+                    telegram_file_id=file_id,
+                    file_name=filename,
+                    file_size=document.file_size,
+                    host=host,
+                    dump_partitions=dump_partitions,
+                )
+                return
             status = await message.reply_text(
                 f"Downloading <code>{html.escape(filename)}</code> from Telegram…",
                 parse_mode=ParseMode.HTML,
@@ -871,6 +1032,26 @@ async def _mirror_attachment(
         return
 
     filename = _attachment_filename(attachment_message, attachment)
+    if remote is not None:
+        file_id = getattr(attachment, "file_id", None)
+        if not file_id:
+            await message.reply_text(
+                "Telegram did not provide a file id for that attachment."
+            )
+            return
+        await _submit_job(
+            update,
+            context,
+            source=filename,
+            source_kind="telegram_file",
+            telegram_file_id=file_id,
+            file_name=filename,
+            file_size=size,
+            host=host,
+            dump_partitions=dump_partitions,
+        )
+        return
+
     status = await message.reply_text(
         f"Downloading <code>{html.escape(filename)}</code> from Telegram…",
         parse_mode=ParseMode.HTML,
@@ -922,6 +1103,35 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     if parts[0] == "cancel" and len(parts) == 2:
+        remote = _remote_manager(context)
+        if remote is not None:
+            record = remote.record(parts[1])
+            if record is None or record.job.finished:
+                await query.answer(
+                    "Job not found or already finished.", show_alert=True
+                )
+                return
+            job = record.job
+            user_id = update.effective_user.id
+            if not _can_cancel(job, user_id, settings):
+                await query.answer(
+                    "Only the job's launcher or an admin can cancel it.",
+                    show_alert=True,
+                )
+                return
+            await query.answer("Cancelling…")
+            if await asyncio.to_thread(remote.cancel_job, job.id, user_id=user_id):
+                await _mark_remote_cancelling(context.bot, record)
+            else:
+                await _edit_remote_card(
+                    context.bot,
+                    job.chat_id,
+                    record.message_id,
+                    "Could not cancel the GitHub Actions run. Try /cancel again.",
+                    keyboard=InlineKeyboardMarkup([]),
+                )
+            return
+
         manager: JobManager = context.application.bot_data["manager"]
         job = manager.get(parts[1])
         if not job or job.finished:
@@ -939,6 +1149,42 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     await query.answer()
+
+
+REMOTE_REFRESH_SECONDS = 15
+
+
+async def _monitor_remote(app: Application) -> None:
+    """Clean up tracked Actions runs and finish cancellation cards."""
+    remote: Optional[RemoteJobManager] = app.bot_data.get("remote")
+    if remote is None:
+        return
+
+    while True:
+        await asyncio.sleep(REMOTE_REFRESH_SECONDS)
+        try:
+            events = await asyncio.to_thread(remote.refresh)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Could not refresh remote jobs")
+            continue
+
+        for event in events:
+            conclusion = event.conclusion.lower()
+            record = event.record
+            if conclusion == "cancelled" or (
+                record.state == "cancelling" and conclusion != "success"
+            ):
+                logger.info("Remote job %s was cancelled.", record.job.id)
+                await _deliver_remote_cancelled(app.bot, record)
+            elif conclusion in REMOTE_FAILURE_CONCLUSIONS:
+                logger.warning(
+                    "Remote job %s failed with conclusion %s.",
+                    record.job.id,
+                    conclusion or "unknown",
+                )
+                await _deliver_remote_failure(app.bot, record)
 
 
 # ------------------------------------------------------------------- lifecycle
@@ -1005,8 +1251,27 @@ def _register(app: Application, settings: Settings, manager: JobManager) -> None
 async def run_bot(
     settings: Settings,
     status: Optional[dict[str, bool]] = None,
+    *,
+    actions_repo: Optional[str] = None,
+    actions_ref: Optional[str] = None,
 ) -> None:
-    manager = JobManager(settings)
+    remote: Optional[RemoteJobManager] = None
+    if settings.remote_jobs:
+        if not actions_repo or not actions_ref:
+            raise RuntimeError(
+                "REMOTE_JOBS requires ACTIONS_REPO and ACTIONS_REF (or the gh CLI "
+                "and a checked-out git branch)."
+            )
+        remote = RemoteJobManager(
+            settings,
+            repo=actions_repo,
+            ref=actions_ref,
+            state_file=settings.remote_state_file,
+        )
+        manager: JobManager | RemoteJobManager = remote
+    else:
+        manager = JobManager(settings)
+
     app = (
         Application.builder()
         .token(settings.telegram_token)
@@ -1016,6 +1281,7 @@ async def run_bot(
     stop_event = asyncio.Event()
     app.bot_data["stop_event"] = stop_event
     _register(app, settings, manager)
+    app.bot_data["remote"] = remote
     state = load_state(settings.state_file)
     app.bot_data["last_update_id"] = int(state.get("last_update_id", 0) or 0)
 
@@ -1046,11 +1312,19 @@ async def run_bot(
     if status is not None:
         status["polling"] = True
     logger.info(
-        "Bot polling started (run_seconds=%s, max_file_size=%s, uploaders=Gofile%s)",
+        "Bot polling started (runner=%s, run_seconds=%s, max_file_size=%s, "
+        "uploaders=Gofile%s)",
+        "GitHub Actions" if remote is not None else "PC",
         settings.run_seconds or "unlimited",
         human_size(settings.max_file_size) if settings.max_file_size > 0 else "unlimited",
         ",Pixeldrain" if settings.pixeldrain_api_key else "",
     )
+
+    monitor_task = None
+    if remote is not None:
+        monitor_task = asyncio.create_task(
+            _monitor_remote(app), name="remote-job-monitor"
+        )
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1071,18 +1345,35 @@ async def run_bot(
         logger.info("Stopping bot…")
         app.bot_data["accepting_jobs"] = False
 
-        # On GitHub Actions, finish jobs that were already running before the
-        # process exits. The workflow has enough timeout budget for this grace
-        # period. Local runs (run_seconds=0) stop immediately on Ctrl+C.
-        if settings.run_seconds > 0:
-            drain_deadline = time.monotonic() + 20 * 60
-            while manager.active_jobs() and time.monotonic() < drain_deadline:
-                await asyncio.sleep(5)
-            if manager.active_jobs():
-                logger.warning("Grace period ended with active jobs; cancelling them.")
+        if monitor_task is not None:
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
 
-        for job in manager.active_jobs():
-            job.cancel.cancel()
+        if remote is not None:
+            # The workers keep running on GitHub after the controller exits.
+            if manager.active_jobs():
+                logger.info(
+                    "Leaving %d job(s) running on GitHub Actions.",
+                    len(manager.active_jobs()),
+                )
+        else:
+            # On GitHub Actions, finish jobs that were already running before
+            # the process exits. The workflow has enough timeout budget for
+            # this grace period. Local runs stop immediately on Ctrl+C.
+            if settings.run_seconds > 0:
+                drain_deadline = time.monotonic() + 20 * 60
+                while manager.active_jobs() and time.monotonic() < drain_deadline:
+                    await asyncio.sleep(5)
+                if manager.active_jobs():
+                    logger.warning(
+                        "Grace period ended with active jobs; cancelling them."
+                    )
+
+            for job in manager.active_jobs():
+                job.cancel.cancel()
 
         try:
             await app.updater.stop()
@@ -1104,9 +1395,18 @@ def main() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("telegram.ext.Application").setLevel(logging.INFO)
 
+    if settings.remote_jobs:
+        if not settings.remote_job_key:
+            logger.error(
+                "REMOTE_JOBS is enabled but REMOTE_JOB_KEY is not set. "
+                "Generate one and set the same value as a GitHub Actions secret."
+            )
+            raise SystemExit(1)
+        logger.info("Remote mode: mirror jobs run on GitHub Actions.")
+
     repo: Optional[str] = None
     ref: Optional[str] = None
-    if settings.local_mode:
+    if settings.local_mode or settings.remote_jobs:
         if "replace-me" in settings.telegram_token:
             logger.error(
                 "TELEGRAM_BOT_TOKEN is still the placeholder from .env.example. "
@@ -1116,16 +1416,24 @@ def main() -> None:
         try:
             repo = resolve_repo(settings.actions_repo)
             ref = settings.actions_ref or current_branch()
-            logger.info("Local mode: checking GitHub Actions (%s, %s).", repo, ref)
-            take_over(repo, branch=ref)
-            sync_offset_from_origin(settings.state_file, ref)
+            if settings.local_mode:
+                logger.info("Local mode: checking GitHub Actions (%s, %s).", repo, ref)
+                take_over(repo, branch=ref)
+                sync_offset_from_origin(settings.state_file, ref)
         except HandoffError as exc:
             logger.error("Cannot start the local bot: %s", exc)
             raise SystemExit(1) from exc
 
     status = {"polling": False}
     try:
-        asyncio.run(run_bot(settings, status))
+        asyncio.run(
+            run_bot(
+                settings,
+                status,
+                actions_repo=repo,
+                actions_ref=ref,
+            )
+        )
     except KeyboardInterrupt:
         pass
     finally:

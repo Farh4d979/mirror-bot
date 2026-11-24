@@ -146,3 +146,88 @@ def test_dispatch_handoff_omits_a_zero_offset(monkeypatch):
     )
     handoff.dispatch_handoff("owner/repo", "main", 0)
     assert not any("offset=" in arg for arg in calls[0])
+
+
+def test_dispatch_job_returns_the_new_run_id(monkeypatch):
+    calls = []
+
+    def fake_gh(args, **kwargs):
+        calls.append((list(args), kwargs))
+        return completed(
+            args,
+            stdout=json.dumps(
+                {
+                    "workflow_run_id": 55,
+                    "html_url": "https://github.com/owner/repo/actions/runs/55",
+                }
+            ),
+        )
+
+    monkeypatch.setattr(handoff, "_gh", fake_gh)
+
+    run_id, run_url = handoff.dispatch_job(
+        "owner/repo", "main", "ciphertext", "abcd1234"
+    )
+
+    assert run_id == 55
+    assert run_url == "https://github.com/owner/repo/actions/runs/55"
+    args, kwargs = calls[0]
+    assert args[:4] == [
+        "api",
+        "--method",
+        "POST",
+        "repos/owner/repo/actions/workflows/job.yml/dispatches",
+    ]
+    assert args[4:6] == ["--input", "-"]
+    body = json.loads(kwargs["input_text"])
+    assert body == {
+        "ref": "main",
+        "inputs": {"payload": "ciphertext", "job_id": "abcd1234"},
+        "return_run_details": True,
+    }
+
+
+def test_dispatch_job_requires_a_run_id(monkeypatch):
+    monkeypatch.setattr(
+        handoff,
+        "_gh",
+        lambda args, **kwargs: completed(args, stdout="{}"),
+    )
+
+    with pytest.raises(handoff.HandoffError, match="run id"):
+        handoff.dispatch_job("owner/repo", "main", "ciphertext", "abcd1234")
+
+
+def test_cancel_run_reports_refusal(monkeypatch):
+    monkeypatch.setattr(
+        handoff,
+        "_gh",
+        lambda args, **kwargs: completed(args, returncode=0),
+    )
+    assert handoff.cancel_run("owner/repo", 55)
+
+    monkeypatch.setattr(
+        handoff,
+        "_gh",
+        lambda args, **kwargs: completed(args, returncode=1, stderr="gone"),
+    )
+    assert not handoff.cancel_run("owner/repo", 55)
+
+
+def test_view_run_parses_metadata(monkeypatch):
+    monkeypatch.setattr(
+        handoff,
+        "_gh",
+        lambda args, **kwargs: completed(
+            args,
+            stdout=json.dumps(
+                {"databaseId": 55, "status": "completed", "conclusion": "success"}
+            ),
+        ),
+    )
+
+    assert handoff.view_run("owner/repo", 55) == {
+        "databaseId": 55,
+        "status": "completed",
+        "conclusion": "success",
+    }

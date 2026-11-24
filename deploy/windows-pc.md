@@ -1,22 +1,32 @@
 # Run the bot on your Windows PC
 
-This is the recommended free setup. The PC is the normal Telegram poller.
-GitHub Actions is an **on-demand fallback**: the PC starts one run when it hands
-over, and takes the bot back when it starts again. There is no schedule and no
-self-queue in the workflow.
+This is the recommended free setup. The PC is the normal Telegram poller, but in
+split mode it does **not** download or upload anything. Each job is dispatched
+to a one-shot GitHub Actions worker. The PC tracks the run id for `/status` and
+`/cancel`, while the worker edits the Telegram progress message and posts the
+final link.
+
+`bot.yml` remains an **on-demand fallback poller**: the PC starts one run when
+it hands over, and takes the bot back when it starts again. There is no schedule
+and no self-queue in either workflow.
 
 ## How it works
 
 ```
-PC online:     Telegram → PC bot → Gofile / Pixeldrain
+PC online:     Telegram → PC controller → job.yml worker on GitHub Actions
+                         ↓ /cancel
                          ↓ Ctrl+C or /handoff
-PC handoff:    PC stops → one GitHub Actions run (max 4h45m)
+PC handoff:    PC stops → one bot.yml fallback run (max 4h45m)
                          ↓ PC starts again
-PC takeover:   PC cancels the Actions run → PC polls again
+PC takeover:   PC cancels bot.yml → PC polls again
 ```
 
 - **Only one poller.** Telegram allows one `getUpdates` consumer per bot token.
-  The PC cancels any active run and waits for it to finish before polling.
+  The PC cancels any active `bot.yml` run and waits for it to finish before
+  polling. `job.yml` workers do not poll and are left alone.
+- **Jobs survive a PC restart.** A dispatched worker keeps running on GitHub and
+  posts its own result. The PC reloads `.state/remote-jobs.json` to keep
+  tracking it.
 - **No automatic failover on power loss.** If the PC crashes or is switched off
   without a handoff, the bot is offline until the PC returns. Telegram keeps
   updates for 24 hours, so pending messages are delivered then. This is the
@@ -35,8 +45,9 @@ PC takeover:   PC cancels the Actions run → PC polls again
 - GitHub CLI (`gh`) from [cli.github.com](https://cli.github.com/), signed in
   with `gh auth login`.
 - A GitHub repository containing this project (`origin` must point to it).
-- Enough free disk for downloads. The PC is the limit; there is no runner
-  14 GB cap.
+- A free public repository, or enough private-repo Actions minutes for the jobs.
+- The Actions runner has about 14 GB of free disk, and each job is capped at 6
+  hours. Large downloads must fit there, not on the PC.
 
 ## 1. Install the tools
 
@@ -53,6 +64,8 @@ The script:
 - creates `.venv` and installs `requirements.txt`;
 - creates `.env` from `.env.example` if it does not exist.
 
+The system tools are used by local and fallback runs. A split-mode worker installs
+its own copy on the Actions runner, so the PC does not need them for remote jobs.
 Open a new terminal after it finishes so the updated PATH is visible.
 
 ## 2. Configure `.env`
@@ -93,6 +106,19 @@ do not need to put them in `.env`. If you want to point the fallback at a
 different repository or branch, set `ACTIONS_REPO=owner/name` or
 `ACTIONS_REF=main`.
 
+### Enable split mode
+
+Generate the shared payload key, write `REMOTE_JOBS=1` and the key to `.env`,
+and upload the same key as a repository secret:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\configure-remote.ps1
+```
+
+The script prints neither the key nor the secret. Re-run it with `-Rotate` to
+replace the key; restart the PC bot afterwards, and cancel any workers that were
+started with the old key. Keep `REMOTE_JOB_KEY` out of chat, logs and commits.
+
 ## 3. Verify GitHub CLI access
 
 ```powershell
@@ -109,6 +135,7 @@ and **Contents: write** access.
 Telegram will return `409 Conflict` if two processes poll at the same time.
 The PC runner handles this automatically: on startup it lists active
 `bot.yml` runs, cancels them, and waits until GitHub marks them completed.
+`job.yml` workers are not pollers and are left running.
 
 If that fails, cancel the run manually:
 
@@ -128,7 +155,7 @@ scripts\run-local.cmd
 Wait for:
 
 ```
-Bot polling started (run_seconds=unlimited, ...)
+Bot polling started (runner=GitHub Actions, run_seconds=unlimited, ...)
 ```
 
 Send `/start` to the bot in Telegram. Keep the window open and stop the bot
@@ -137,17 +164,17 @@ process before it starts the fallback.
 
 ### Handoff and takeover
 
-- **`/handoff`** (owner, private chat): stops the PC bot and starts one Actions
-  run. It refuses while a job is active so the job is not lost.
-- **Ctrl+C**: stops the PC bot and starts the fallback. Active jobs are
-  cancelled because their files live only on the PC.
+- **`/handoff`** (owner, private chat): stops the PC bot and starts one
+  fallback `bot.yml` run. It refuses while a job is active.
+- **Ctrl+C**: stops the PC bot and starts the fallback. In split mode, remote
+  jobs already dispatched keep running on GitHub and still post their result.
 - **Start without fallback**: `scripts\run-local.cmd nohandoff` stops without
   starting Actions.
-- **PC starts again**: it cancels the fallback run and takes over. If a run
+- **PC starts again**: it cancels the fallback poller and takes over. If a run
   cannot be cancelled within 3 minutes, the PC refuses to start so both
-  processes do not poll at once. **This interrupts a job the fallback is
+  processes do not poll at once. **This interrupts a job the fallback poller is
   processing.** Send `/status` in Telegram before starting the PC and wait for
-  any active fallback job to finish.
+  any active fallback job to finish. Split workers are unaffected.
 
 The fallback run lasts at most **4 hours 45 minutes** and then exits. If the PC
 will be off longer, start another run manually from the Actions tab.
@@ -215,8 +242,29 @@ not start the PC bot while a run is still `in_progress`.
 not signed in, wrong repository (`ACTIONS_REPO`), or a workflow that is
 disabled. You can start it manually from the Actions tab.
 
+**A split job never starts** — `job.yml` must exist on the branch in
+`ACTIONS_REF`. Push it, then check:
+
+```powershell
+gh workflow list
+gh run list --workflow job.yml
+```
+
+**Could not start GitHub Actions** — the PC's `gh` login needs **Actions:
+write**. Re-run `gh auth login` or update the token, then send the job again.
+
+**The worker says it could not decrypt the payload** — the PC's
+`REMOTE_JOB_KEY` and the repository secret of the same name do not match. Run
+`scripts\configure-remote.ps1 -Rotate`, restart the PC bot, and start a new job.
+Old workers that used the previous key cannot be recovered.
+
+**The progress message stops updating** — check the failed `job.yml` run log.
+If the message was deleted in Telegram, the worker sends the final card as a new
+message. If `/cancel` does nothing, the run may already be finished.
+
 **ffmpeg or aria2c not found** — open a new terminal after running the setup
-script. The installer updates the user PATH.
+script. The installer updates the user PATH. Split workers install their own
+tools and are not affected.
 
 **MEGA link fails** — `tools\megatools.exe` is installed. Newer megatools
 builds use one executable with a `dl` subcommand; the bot detects this. Check
@@ -230,8 +278,12 @@ plugged in, or accept the downtime. There is no automatic wake-up.
 
 ## Security
 
-- `.env` contains the bot token and upload keys. Never commit it. It is in
-  `.gitignore`.
+- `.env` contains the bot token, upload keys and `REMOTE_JOB_KEY`. Never commit
+  it. It is in `.gitignore`.
+- The same `REMOTE_JOB_KEY` is a GitHub Actions secret. Job payloads are
+  encrypted, but anyone who can read that secret or your Actions logs may learn
+  the source links and filenames. Keep the repository public only if that is
+  acceptable.
 - Use an owner-only `ALLOWED_USER_IDS`; a group member can spend your bandwidth
   and upload quota.
 - Keep Windows, Python, yt-dlp, gallery-dl and the tools updated.

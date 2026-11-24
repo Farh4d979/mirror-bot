@@ -22,6 +22,7 @@ from .state import save_state
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKFLOW = "bot.yml"
+DEFAULT_JOB_WORKFLOW = "job.yml"
 DEFAULT_BRANCH = "main"
 DEFAULT_RUN_SECONDS = 17100
 DEFAULT_TAKEOVER_TIMEOUT = 180
@@ -37,6 +38,7 @@ def _gh(
     *,
     check: bool = True,
     timeout: float = 60,
+    input_text: Optional[str] = None,
 ) -> subprocess.CompletedProcess[str]:
     command = ["gh", *args]
     env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
@@ -49,6 +51,7 @@ def _gh(
             errors="replace",
             timeout=timeout,
             env=env,
+            input=input_text,
         )
     except FileNotFoundError as exc:
         raise HandoffError(
@@ -282,3 +285,89 @@ def dispatch_handoff(
         run_seconds,
         offset or "unchanged",
     )
+
+
+def dispatch_job(
+    repo: str,
+    ref: str,
+    payload: str,
+    job_id: str,
+    *,
+    workflow: str = DEFAULT_JOB_WORKFLOW,
+) -> tuple[int, str]:
+    """Start one one-shot worker run and return ``(run_id, run_url)``.
+
+    The caller encrypts the job details; the payload is opaque to GitHub.  The
+    API call asks GitHub to return the new run id so the PC can track and
+    cancel it without racing another dispatch.
+    """
+    body = json.dumps(
+        {
+            "ref": ref,
+            "inputs": {"payload": payload, "job_id": job_id},
+            "return_run_details": True,
+        }
+    )
+    result = _gh(
+        [
+            "api",
+            "--method",
+            "POST",
+            f"repos/{repo}/actions/workflows/{workflow}/dispatches",
+            "--input",
+            "-",
+        ],
+        input_text=body,
+        timeout=90,
+    )
+    try:
+        data = json.loads(result.stdout or "{}")
+        run_id = int(data.get("workflow_run_id") or 0)
+        run_url = str(data.get("html_url") or "")
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise HandoffError("GitHub did not return the new workflow run id.") from exc
+    if run_id <= 0:
+        raise HandoffError("GitHub did not return the new workflow run id.")
+    logger.info("Started GitHub Actions job %s (run %s).", job_id, run_id)
+    return run_id, run_url
+
+
+def cancel_run(repo: str, run_id: int) -> bool:
+    """Cancel one Actions run; return False when GitHub refuses."""
+    result = _gh(
+        ["run", "cancel", str(run_id), "--repo", repo],
+        check=False,
+        timeout=45,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        logger.warning(
+            "Could not cancel run %s: %s",
+            run_id,
+            detail[-1] if detail else f"exit code {result.returncode}",
+        )
+        return False
+    return True
+
+
+def view_run(repo: str, run_id: int) -> dict[str, Any]:
+    """Return the status/conclusion metadata for one Actions run."""
+    result = _gh(
+        [
+            "run",
+            "view",
+            str(run_id),
+            "--repo",
+            repo,
+            "--json",
+            "databaseId,status,conclusion,url,createdAt,displayTitle",
+        ],
+        timeout=45,
+    )
+    try:
+        data = json.loads(result.stdout or "{}")
+    except ValueError as exc:
+        raise HandoffError("Could not read the GitHub Actions run.") from exc
+    if not isinstance(data, dict):
+        raise HandoffError("Unexpected response from `gh run view`.")
+    return data

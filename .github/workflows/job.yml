@@ -1,0 +1,81 @@
+name: Mirror Job Worker
+
+# One-shot worker started by the PC controller for a single mirror/dump job.
+# GitHub only sees an encrypted payload. The worker edits the Telegram message
+# created by the controller and posts the final link itself.
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: "Encrypted job payload (created by the PC controller)"
+        required: true
+      job_id:
+        description: "Random job id from the PC controller"
+        required: true
+
+run-name: "Mirror job ${{ github.event.inputs.job_id }}"
+
+concurrency:
+  group: mirror-job-${{ github.event.inputs.job_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      REMOTE_JOB_KEY: ${{ secrets.REMOTE_JOB_KEY }}
+      GOFILE_TOKEN: ${{ secrets.GOFILE_TOKEN }}
+      PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+      REMOTE_PAYLOAD: ${{ github.event.inputs.payload }}
+      REMOTE_JOB_ID: ${{ github.event.inputs.job_id }}
+      GOFILE_WT_SALT: ${{ vars.GOFILE_WT_SALT || '12af056dacea0b' }}
+      DOWNLOAD_DIR: ${{ runner.temp }}/mirror-downloads
+      LOG_LEVEL: INFO
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install system tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq aria2 ffmpeg megatools xz-utils
+
+      - name: Install payload-dumper-go
+        run: |
+          set -euo pipefail
+          curl --connect-timeout 15 --max-time 180 -fsSL \
+            -o "$RUNNER_TEMP/payload-dumper-go.tar.gz" \
+            https://github.com/ssut/payload-dumper-go/releases/download/2.1.0/payload-dumper-go_2.1.0_linux_amd64.tar.gz
+          sudo tar -xzf "$RUNNER_TEMP/payload-dumper-go.tar.gz" \
+            -C /usr/local/bin payload-dumper-go
+          sudo chmod +x /usr/local/bin/payload-dumper-go
+          command -v payload-dumper-go
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Show runner disk
+        run: df -h /
+
+      - name: Run mirror job
+        run: python -m mirror.worker
+
+      - name: Clean downloads
+        if: always()
+        run: rm -rf "${{ runner.temp }}/mirror-downloads"

@@ -55,3 +55,16 @@ def test_auto_handoff_can_be_disabled(monkeypatch):
     settings = load_settings()
     assert settings.local_mode is True
     assert settings.auto_handoff is False
+
+
+def test_remote_job_settings(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("REMOTE_JOBS", "1")
+    monkeypatch.setenv("REMOTE_JOB_KEY", "fernet-key")
+    monkeypatch.setenv("REMOTE_WORKFLOW", "custom-job.yml")
+    monkeypatch.setenv("REMOTE_STATE_FILE", "state/remote.json")
+    settings = load_settings()
+    assert settings.remote_jobs is True
+    assert settings.remote_job_key == "fernet-key"
+    assert settings.remote_workflow == "custom-job.yml"
+    assert settings.remote_state_file.name == "remote.json"

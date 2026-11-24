@@ -20,7 +20,8 @@ for /d %%D in ("%LOCALAPPDATA%\Microsoft\WinGet\Packages\aria2.aria2_*") do (
 )
 
 rem This run is the primary PC runner. On startup it cancels any active
-rem GitHub Actions run; on exit it starts one on-demand fallback run.
+rem bot.yml fallback run; job.yml workers keep running. On exit it starts one
+rem on-demand fallback run. With REMOTE_JOBS=1, mirror jobs run on job.yml.
 set "LOCAL_MODE=1"
 
 rem Keep the tracked .state/telegram.json file for GitHub Actions only.

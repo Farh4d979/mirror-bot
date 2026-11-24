@@ -54,6 +54,10 @@ class Settings:
     auto_handoff: bool = False
     actions_repo: str | None = None
     actions_ref: str | None = None
+    remote_jobs: bool = False
+    remote_job_key: str | None = None
+    remote_workflow: str = "job.yml"
+    remote_state_file: Path = Path(".state/remote-jobs.json")
     download_dir: Path = Path("downloads")
     state_file: Path = Path(".state/telegram.json")
     gofile_token: str | None = None
@@ -82,6 +86,9 @@ def load_settings() -> Settings:
     cookies = os.getenv("COOKIES_FILE", "").strip()
     download_dir = Path(os.getenv("DOWNLOAD_DIR", "downloads")).expanduser()
     state_file = Path(os.getenv("STATE_FILE", ".state/telegram.json")).expanduser()
+    remote_state_file = Path(
+        os.getenv("REMOTE_STATE_FILE", ".state/remote-jobs.json")
+    ).expanduser()
     local_mode = _env_bool("LOCAL_MODE", False)
 
     return Settings(
@@ -95,6 +102,10 @@ def load_settings() -> Settings:
         auto_handoff=_env_bool("AUTO_HANDOFF", local_mode),
         actions_repo=os.getenv("ACTIONS_REPO", "").strip() or None,
         actions_ref=os.getenv("ACTIONS_REF", "").strip() or None,
+        remote_jobs=_env_bool("REMOTE_JOBS", False),
+        remote_job_key=os.getenv("REMOTE_JOB_KEY", "").strip() or None,
+        remote_workflow=os.getenv("REMOTE_WORKFLOW", "").strip() or "job.yml",
+        remote_state_file=remote_state_file,
         download_dir=download_dir,
         state_file=state_file,
         gofile_token=os.getenv("GOFILE_TOKEN", "").strip() or None,

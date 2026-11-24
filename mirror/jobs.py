@@ -44,6 +44,7 @@ class Job:
     user_name: str = ""
     source_kind: str = "url"  # url | torrent_file | telegram_file
     local_path: Optional[Path] = None
+    telegram_file_id: Optional[str] = None
     status: str = "queued"
     stage: str = "queued"
     percent: Optional[float] = None
@@ -364,6 +365,7 @@ def new_job(
     user_name: str = "",
     source_kind: str = "url",
     local_path: Optional[Path] = None,
+    telegram_file_id: Optional[str] = None,
     dump_partitions: Sequence[str] = (),
 ) -> Job:
     return Job(
@@ -375,5 +377,6 @@ def new_job(
         user_name=user_name,
         source_kind=source_kind,
         local_path=local_path,
+        telegram_file_id=telegram_file_id,
         dump_partitions=tuple(dump_partitions),
     )

@@ -37,15 +37,23 @@ Telegram link / .torrent / file
 - Pixeldrain file links (`pixeldrain.com/u/...`) are downloaded through Pixeldrain's API. When `PIXELDRAIN_API_KEY` is set, the bot authenticates the download so a Pro/Prepaid account uses its own transfer quota instead of the shared free per-IP quota.
 - Progress bars, cancel buttons, per-user job limits, size limits and timeouts.
 - Private DMs are restricted to `ALLOWED_USER_IDS`; groups work while at least one of those users is a member. Channels are ignored.
-- Runs on a Windows PC, Docker, or a small VPS. Telegram long polling means no open ports or domain are needed. GitHub Actions is supported as an **on-demand fallback**, not as the normal 24/7 host.
-- The PC runner can hand the bot to one GitHub Actions run when it exits, and takes the bot back (cancelling the run) when it starts again. See [deploy/windows-pc.md](deploy/windows-pc.md).
+- Runs on a Windows PC, Docker, or a small VPS. Telegram long polling means no open ports or domain are needed.
+- **Split mode:** the PC can act as a Telegram-only controller and send every download/upload job to a one-shot GitHub Actions worker. The PC stays at roughly 60-100 MB of RAM; the runner does the heavy work.
+- The PC runner can also hand the Telegram poller to one GitHub Actions run when it exits, and takes the bot back (cancelling that run) when it starts again. See [deploy/windows-pc.md](deploy/windows-pc.md).
 
-## Recommended: run on your PC
+## Recommended: PC controller + GitHub Actions workers
 
-The safest free setup is to run the bot on your own Windows PC and use GitHub
-Actions only when the PC explicitly hands over. The PC is the only normal
-Telegram poller; Actions is started on demand, runs for at most 4h45m, and does
-not restart itself.
+The Telegram poller runs on your Windows PC, but the heavy work does not. The
+PC receives commands and starts one `job.yml` workflow run per job. The worker
+downloads the file, extracts partitions if asked, uploads to Gofile or
+Pixeldrain, edits the progress message directly through the Bot API, and posts
+the final link. The PC only tracks the run id so `/status` and `/cancel` work.
+
+This keeps the PC responsive and avoids running aria2c, ffmpeg, payload dumper
+and the uploads on your own connection. The tradeoffs are a 1-3 minute wait for
+a runner to start, a ~14 GB runner disk, a 6-hour workflow cap, datacenter-IP
+blocks, public Actions logs in a public repo, and the risk that GitHub may
+restrict Actions usage.
 
 Follow [deploy/windows-pc.md](deploy/windows-pc.md). The short version:
 
@@ -53,26 +61,33 @@ Follow [deploy/windows-pc.md](deploy/windows-pc.md). The short version:
 powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
 powershell -ExecutionPolicy Bypass -File scripts\configure-env.ps1
 gh auth login
+powershell -ExecutionPolicy Bypass -File scripts\configure-remote.ps1
 scripts\run-local.cmd
 ```
 
-The PC runner cancels any active Actions run before polling, so the two never
-fight over Telegram updates. Starting the PC interrupts a job that the fallback
-is processing; check `/status` and let it finish first. On exit (Ctrl+C or
-`/handoff`) the PC starts one Actions run. If the PC loses power or is turned
-off without a handoff, the bot is offline until the PC comes back; Telegram
-keeps updates for 24 hours. That is the tradeoff for not depending on GitHub as
-an always-on server.
+`scripts\configure-remote.ps1` generates a Fernet key, stores it in `.env` with
+`REMOTE_JOBS=1`, and uploads the same value as the `REMOTE_JOB_KEY` repository
+secret. Job payloads are encrypted with that key before they are passed to
+GitHub, so source links and upload credentials are not stored in the dispatch
+request in plaintext.
+
+The PC cancels any active `bot.yml` fallback run before polling, so the two
+never fight over Telegram updates. `job.yml` workers are deliberately left
+alone: they keep running across PC restarts and post their own result cards.
+On exit (Ctrl+C or `/handoff`) the PC starts one `bot.yml` fallback run. If the
+PC loses power or is turned off without a handoff, the bot is offline until the
+PC comes back; Telegram keeps updates for 24 hours.
 
 If you have an always-on Linux box, the included Docker image is a good
 alternative. [deploy/oracle-cloud.md](deploy/oracle-cloud.md) describes Oracle
 Cloud's Always Free VM, but Oracle now requires card verification and may stop
 idle instances, so use it only if that suits you.
 
-## On-demand GitHub Actions fallback
+## GitHub Actions setup
 
-The workflow has **no schedule and no self-queue**. It only runs when the PC
-hands over or when you start it manually from **Actions → Telegram Mirror Bot →
+The job workflow has **no schedule**. It runs once per job dispatched by the
+PC. The fallback `bot.yml` workflow also has no schedule and no self-queue; it
+only runs when the PC hands over or when you start it manually from **Actions → Telegram Mirror Bot →
 Run workflow**. A run stops after its time limit instead of keeping GitHub
 Actions busy indefinitely.
 
@@ -98,27 +113,31 @@ Actions busy indefinitely.
    | Secret | Required | Purpose |
    |---|---|---|
    | `TELEGRAM_BOT_TOKEN` | yes | BotFather token |
-   | `ALLOWED_USER_IDS` | recommended | Comma-separated IDs allowed to DM the bot, e.g. `123456789,987654321`. Groups are enabled while one of these IDs is a member. |
-   | `GOFILE_TOKEN` | optional | Uses your Gofile account for uploads and share-link downloads instead of guest tokens |
-   | `PIXELDRAIN_API_KEY` | optional | Required for `/px` uploads. Also authenticates Pixeldrain downloads; a Pro/Prepaid key uses the account's own transfer quota. |
+   | `ALLOWED_USER_IDS` | recommended | Comma-separated IDs allowed to DM the bot, e.g. `123456789,987654321`. Groups are enabled while one of these IDs is a member. Used by the fallback poller. |
+   | `REMOTE_JOB_KEY` | yes for split mode | Fernet key shared with the PC. `scripts\configure-remote.ps1` generates it and uploads it for you. Never paste it into chat or a commit. |
+   | `GOFILE_TOKEN` | optional | Uses your Gofile account for uploads and share-link downloads instead of guest tokens. The split worker receives this from the encrypted payload, so this secret is only needed by the fallback poller. |
+   | `PIXELDRAIN_API_KEY` | optional | Required for `/px` uploads. Also authenticates Pixeldrain downloads; a Pro/Prepaid key uses the account's own transfer quota. The split worker receives this from the encrypted payload. |
 
-   Optional repository **variables** (Settings → Secrets and variables → Actions → Variables): `MAX_FILE_SIZE` (`0`, unlimited), `MAX_CONCURRENT_JOBS` (`1`), `JOB_TIMEOUT` (`7200`), `MULTI_FILE_MODE` (`largest`), `YTDLP_FORMAT` (`bv*+ba/b`), `GOFILE_WT_SALT` (only needed if Gofile rotates its website-token salt).
+   Optional repository **variables** (Settings → Secrets and variables → Actions → Variables): `MAX_FILE_SIZE` (`0`, unlimited), `MAX_CONCURRENT_JOBS` (`1`), `JOB_TIMEOUT` (`7200`), `MULTI_FILE_MODE` (`largest`), `YTDLP_FORMAT` (`bv*+ba/b`), `GOFILE_WT_SALT` (only needed if Gofile rotates its website-token salt). These apply to the fallback poller; the split worker receives the PC's current values inside the encrypted payload.
 
 5. **Start a fallback run only when needed.** Open the **Actions** tab → **Telegram Mirror Bot** → **Run workflow**. Leave `run_seconds` blank for 4h45m, or set a small value such as `60` for a test. The PC runner normally does this for you.
 
+   Split-mode jobs appear as **Mirror Job Worker** runs. Do not cancel them unless you want to stop that job; the PC's `/cancel` does this for you.
+
 ### GitHub Actions limitations
 
-- **One job is capped at 6 hours.** A fallback run polls for 4h45m (`BOT_RUN_SECONDS=17100`) and exits. It does not queue a successor. Start another run only if you still need the fallback.
-- **Only one poller at a time.** Telegram allows a single `getUpdates` consumer per bot token. The PC runner cancels active runs and waits before it starts polling; if you run both, one gets `409 Conflict`.
-- **No automatic failover.** If the PC crashes, sleeps, or loses power without a handoff, nothing starts Actions. Telegram keeps updates for 24 hours, so they are delivered when the PC returns.
-- **Private repos run out of minutes.** 2,000 minutes/month is roughly 33 hours. Use a public repo for fallback runs, or keep the runtime on the PC.
-- **Disk is limited.** The standard runner has about 14 GB of SSD. A single file must fit on the runner; the practical ceiling is roughly 12 GB. Set `MAX_FILE_SIZE` if you want a hard cap, and keep `MAX_CONCURRENT_JOBS=1` when mirroring large files.
-- **State commits.** The workflow pushes a tiny state commit (`chore: update bot state [skip ci]`) when the Telegram offset changes. If `main` is protected, allow GitHub Actions to push, or change the workflow to use a cache instead. The PC passes its current offset into the fallback run so already-handled updates are not replayed.
-- **Actions logs are public in a public repo.** Do not print tokens; the bot does not log them.
-- **No inbound webhook.** The bot uses long polling, so it only handles messages while the PC or a fallback run is active.
-- **Datacenter IPs get blocked.** YouTube and other video sites often ask for a sign-in from GitHub's IPs, and BitTorrent traffic may be throttled. The PC's home connection is usually better for video sites.
+- **Runner startup takes 1-3 minutes.** Each `job.yml` job waits for a fresh Ubuntu runner. Small files therefore take longer than they would on the PC.
+- **One job is capped at 6 hours.** A fallback run polls for 4h45m (`BOT_RUN_SECONDS=17100`) and exits. A split worker also has a 350-minute workflow timeout. Neither queues a successor; start another run only if you still need the fallback.
+- **Only one poller at a time.** Telegram allows a single `getUpdates` consumer per bot token. The PC runner cancels active `bot.yml` runs and waits before it starts polling; if you run both, one gets `409 Conflict`. `job.yml` workers do not poll and are left running.
+- **No automatic failover.** If the PC crashes, sleeps, or loses power without a handoff, nothing starts the fallback poller. Telegram keeps updates for 24 hours, so they are delivered when the PC returns. Split workers that were already dispatched keep running.
+- **Private repos run out of minutes.** 2,000 minutes/month is roughly 33 hours. Use a public repo for Actions work.
+- **Disk is limited.** The standard runner has about 14 GB of SSD. A single file must fit on the runner; the practical ceiling is roughly 12 GB. Set `MAX_FILE_SIZE` if you want a hard cap.
+- **State commits.** The fallback workflow pushes a tiny state commit (`chore: update bot state [skip ci]`) when the Telegram offset changes. If `main` is protected, allow GitHub Actions to push, or change the workflow to use a cache instead. The PC passes its current offset into the fallback run so already-handled updates are not replayed.
+- **Actions logs are public in a public repo.** The job payload is encrypted, but host errors and filenames can still appear in the worker log. Do not put secrets in filenames or URLs.
+- **No inbound webhook.** The bot uses long polling, so commands are only handled while the PC or a fallback run is active.
+- **Datacenter IPs get blocked.** YouTube and other video sites often ask for a sign-in from GitHub's IPs, and BitTorrent traffic may be throttled. A file that works on your PC can still fail on the runner.
 - **End-of-run grace period.** A fallback run stops accepting new jobs before its time limit and waits up to 20 minutes for active jobs to finish.
-- **Terms of service.** GitHub Actions is intended for the repository's own software work. An occasional, owner-only fallback is much less risky than a 24/7 public mirror service, but it is not guaranteed to be exempt from GitHub's limits. The PC is the normal host for a reason.
+- **Terms of service.** GitHub Actions is intended for the repository's own software work. Using it to mirror arbitrary files is a risk to your account. Keep the bot owner-only and use it occasionally rather than as a public service.
 
 ## Local setup
 
@@ -168,6 +187,13 @@ state clean, and requires `gh auth login`. Set `LOCAL_MODE=0` or run
 `scripts\run-local.cmd nohandoff` if you want a plain local bot without GitHub
 coordination.
 
+`REMOTE_JOBS=1` enables split mode: the PC polls Telegram and dispatches every
+mirror job to `job.yml`. It requires `REMOTE_JOB_KEY` (the same Fernet key as
+the GitHub secret) and `gh auth login`. Run
+`scripts\configure-remote.ps1` once to generate the key, update `.env`, and
+upload the secret. You can use split mode together with `LOCAL_MODE=1`; the
+fallback then still exists, but jobs while the PC is online run on Actions.
+
 
 ## Docker
 
@@ -210,13 +236,17 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go and gallery-dl. D
 | `GOFILE_TOKEN` | empty | Optional Gofile account token. Empty = guest uploads. |
 | `PIXELDRAIN_API_KEY` | empty | Pixeldrain API key. Required for `/px`; also used to authenticate Pixeldrain downloads. |
 | `MAX_FILE_SIZE` | `0` | Maximum downloaded file size; `0` = no bot-side limit |
-| `MAX_CONCURRENT_JOBS` | `2` | Parallel jobs (`1` in the Actions workflow) |
+| `MAX_CONCURRENT_JOBS` | `2` | Parallel local/fallback jobs (`1` in the Actions workflow). Split-mode jobs each get their own runner. |
 | `JOB_TIMEOUT` | `7200` | Per-job timeout in seconds |
 | `BOT_RUN_SECONDS` | `0` | Stop after N seconds; `0` = run until stopped. Actions fallback runs use `17100`. |
 | `LOCAL_MODE` | `0` | `1` = PC-primary mode: cancel active Actions runs on startup and coordinate handoff. |
 | `AUTO_HANDOFF` | `LOCAL_MODE` | Start one Actions fallback when the PC runner exits. `0` disables the handoff. |
-| `ACTIONS_REPO` | detected | Optional `owner/name` for handoff; normally read from the current `gh` login. |
-| `ACTIONS_REF` | current branch | Optional branch that the fallback workflow should run. |
+| `ACTIONS_REPO` | detected | Optional `owner/name` for handoff and remote jobs; normally read from the current `gh` login. |
+| `ACTIONS_REF` | current branch | Optional branch that the fallback and job workflows should run. |
+| `REMOTE_JOBS` | `0` | `1` = split mode: the PC only polls Telegram and dispatches each job to `job.yml`. Requires `REMOTE_JOB_KEY`. |
+| `REMOTE_JOB_KEY` | empty | Fernet key shared with the `REMOTE_JOB_KEY` GitHub secret. Encrypts job payloads; keep it out of git and chat. |
+| `REMOTE_WORKFLOW` | `job.yml` | Worker workflow name used for dispatch. |
+| `REMOTE_STATE_FILE` | `.state/remote-jobs.json` | PC-side tracking file for dispatched Actions runs. |
 | `MULTI_FILE_MODE` | `largest` | For torrents/multi-file downloads: upload the largest file, or `zip` everything |
 | `YTDLP_FORMAT` | `bv*+ba/b` | yt-dlp format selector |
 | `COOKIES_FILE` | empty | Optional Netscape cookies file for restricted video sites and galleries |
@@ -306,19 +336,19 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 
 **Pixeldrain rejects the API key (`authentication_failed`)** — create a fresh key at `https://pixeldrain.com/user/api_keys` and update the `PIXELDRAIN_API_KEY` secret. Keys are only used on `pixeldrain.com` hosts.
 
-**`/px` says `PIXELDRAIN_API_KEY` is not set** — `/gf` and `/mirror` still work with Gofile. Pixeldrain requires an account key for uploads, but the account is free and allows 10 GB per file: create one at `https://pixeldrain.com/user/api_keys` and add it as the `PIXELDRAIN_API_KEY` repository secret. There is no upload size cap in the bot itself.
+**`/px` says `PIXELDRAIN_API_KEY` is not set** — `/gf` and `/mirror` still work with Gofile. Pixeldrain requires an account key for uploads, but the account is free and allows 10 GB per file: create one at `https://pixeldrain.com/user/api_keys` and add it to `.env` (and to the repository secret if you use the fallback poller). There is no upload size cap in the bot itself.
 
 **A Gofile share link fails** — the bot reads share links with a temporary guest token, so no account is needed. Password-protected folders are not supported. If Gofile changes its website-token salt, set `GOFILE_WT_SALT` to the current value from `https://gofile.io/js/wt.obf.js`; the default is `12af056dacea0b`.
 
 **Torrents do not start** — install aria2c (`aria2c --version`) and make sure the PC tools, workflow, or Docker image includes it. A magnet with no seeders stops after 5 minutes (`--bt-stop-timeout=300`).
 
-**Video download fails** - update yt-dlp (`pip install -U yt-dlp`). Age/region-locked sites may need `COOKIES_FILE`. GitHub Actions IPs are frequently blocked by YouTube; the PC's home connection is usually better.
+**Video download fails** - update yt-dlp (`pip install -U yt-dlp`). Age/region-locked sites may need `COOKIES_FILE`. GitHub Actions IPs are frequently blocked by YouTube; set `REMOTE_JOBS=0` temporarily if you need the PC's home connection.
 
 **Gallery download fails** - update gallery-dl (`pip install -U gallery-dl`). Login-only galleries may need `COOKIES_FILE`. Direct image URLs still go through aria2c and do not need gallery-dl.
 
 **MEGA download fails** - install megatools (`apt install megatools`, or run `scripts\setup-windows.ps1` on Windows). Newer Windows builds provide `megatools.exe` instead of `megadl.exe`; the bot handles both. The link must be a public/exported file or folder link, and MEGA transfer quotas still apply.
 
-**Torrents do not connect** — many datacenter networks block BitTorrent. The PC's connection is usually better than a cloud runner. Try a direct link if it still fails.
+**Torrents do not connect** — many datacenter networks block BitTorrent. Set `REMOTE_JOBS=0` to use the PC's connection, or try a direct link.
 
 **The Actions run stops after 4h45m** — that is expected. On-demand runs do not queue a successor. Start another run only if you still need the fallback; otherwise let the PC take over.
 
@@ -330,7 +360,7 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 
 **The state push fails** — the repository's default branch is probably protected. Allow GitHub Actions to push, or replace the state step with `actions/cache` restore/save.
 
-**Disk full** — set `MAX_FILE_SIZE` to a value that fits the PC or runner and keep `MAX_CONCURRENT_JOBS=1`. Each job deletes its temporary files when it finishes.
+**Disk full** — set `MAX_FILE_SIZE` to a value that fits the runner (about 12 GB practical) or the PC for local jobs. Each job deletes its temporary files when it finishes.
 
 ## Security and legal notes
 
@@ -348,7 +378,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 pytest -q
 ```
 
-The tests cover URL/filename handling, the HTML download-button resolver, Gofile and Pixeldrain resolution and uploads with mocked HTTP responses, command parsing, and the downloader's header and file-collection logic.
+The tests cover URL/filename handling, the HTML download-button resolver, Gofile and Pixeldrain resolution and uploads with mocked HTTP responses, command parsing, the downloader's header and file-collection logic, encrypted remote payloads, run tracking/cancellation, and the Actions worker's payload validation and Telegram card delivery.
 
 ## Project layout
 
@@ -356,7 +386,11 @@ The tests cover URL/filename handling, the HTML download-button resolver, Gofile
 bot.py                     Telegram handlers and polling lifecycle
 mirror/
   config.py                Environment settings
-  handoff.py               PC ↔ GitHub Actions takeover and state offset sync
+  handoff.py               PC ↔ GitHub Actions dispatch, cancel and takeover
+  remote.py                Encrypted job payloads and PC-side run tracking
+  worker.py                One-shot Actions entry point for a single job
+  render.py                Shared Telegram progress and result cards
+  telegram_api.py          Small synchronous Bot API client for the worker
   resolver.py              Page → direct link
   downloader.py            aria2c / yt-dlp / requests engines
   jobs.py                  Queue, progress state, download → upload pipeline
@@ -365,14 +399,16 @@ mirror/
     gofile.py              Gofile upload fleet API
     pixeldrain.py          Pixeldrain raw PUT uploader
 .github/workflows/
-  bot.yml                  On-demand GitHub Actions fallback
+  job.yml                  One-shot worker dispatched by the PC
+  bot.yml                  On-demand GitHub Actions fallback poller
   tests.yml                Unit tests
 deploy/
-  windows-pc.md            Recommended Windows PC + fallback guide
+  windows-pc.md            Recommended Windows PC + workers guide
   oracle-cloud.md          Optional Oracle Cloud Always Free guide
 scripts/
   setup-windows.ps1        Installs Windows tools and Python dependencies
   configure-env.ps1        Writes the bot token and owner IDs to .env
+  configure-remote.ps1     Generates REMOTE_JOB_KEY and uploads the secret
   run-local.cmd            Starts the PC runner and enables handoff
   install-startup-task.ps1 Starts the PC runner at logon
 docker-compose.yml         Alternative Docker deployment
