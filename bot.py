@@ -966,7 +966,7 @@ async def _mirror_attachment(
 
     document = attachment_message.document
     if document:
-        name = document.file_name or "file.torrent"
+        name = document.file_name or ""
         is_torrent = name.lower().endswith(".torrent") or document.mime_type in {
             "application/x-bittorrent",
             "application/x-bittorrent; charset=utf-8",
@@ -978,7 +978,7 @@ async def _mirror_attachment(
                     "Send a direct link to a larger .torrent file instead."
                 )
                 return
-            filename = sanitize_filename(name, "file.torrent")
+            filename = sanitize_filename(name or "file.torrent", "file.torrent")
             file_id = getattr(document, "file_id", None)
             if remote is not None:
                 if not file_id:

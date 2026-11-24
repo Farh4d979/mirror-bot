@@ -162,6 +162,27 @@ def test_gf_reply_to_animation_submits_telegram_file(tmp_path, monkeypatch):
     assert submitted["local_path"].read_bytes() == b"gif-data"
 
 
+def test_gf_reply_to_unnamed_animation_document_is_not_a_torrent(
+    tmp_path, monkeypatch
+):
+    animation = FakeDocument(None, b"gif-data", mime_type="video/mp4")
+    replied = FakeAttachmentMessage(animation)
+    replied.animation = animation
+    command = FakeCommandMessage(replied)
+    update = make_command_update(command)
+    context = make_context(tmp_path)
+    submitted = {}
+
+    async def fake_submit(update, context, **kwargs):
+        submitted.update(kwargs)
+
+    monkeypatch.setattr(bot, "_submit_job", fake_submit)
+    asyncio.run(bot._cmd_link(update, context, command="gf"))
+
+    assert submitted["source_kind"] == "telegram_file"
+    assert submitted["local_path"].name == "animation_doc-1.mp4"
+
+
 def test_gf_reply_to_torrent_document_submits_torrent_job(tmp_path, monkeypatch):
     replied = FakeAttachmentMessage(
         FakeDocument(
