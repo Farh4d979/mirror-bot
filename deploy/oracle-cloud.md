@@ -116,9 +116,28 @@ Do **not** leave `ALLOWED_USER_IDS` empty. Empty means anyone can use the bot.
 `MAX_FILE_SIZE=0` means no bot-side limit; the 200 GB disk is the real limit.
 If you chose a smaller boot volume, set a sensible limit.
 
-## 5. Start the bot
+## 5. Stop GitHub Actions, then start the bot
+
+Telegram allows only one `getUpdates` consumer per bot token. Do **not** run the
+GitHub bot and the Oracle bot at the same time, or one of them will get
+`409 Conflict`.
+
+Stop the GitHub fallback first. From your own computer:
 
 ```bash
+gh variable set AUTO_RESTART --body false -R Farh4d979/mirror-bot
+gh run list -R Farh4d979/mirror-bot --workflow bot.yml --limit 1
+gh run cancel <active-run-id> -R Farh4d979/mirror-bot
+```
+
+You can also cancel the active run from the GitHub Actions page and set
+`AUTO_RESTART=false` under **Settings → Secrets and variables → Actions →
+Variables**.
+
+Then, on the Oracle VM:
+
+```bash
+cd ~/mirror-bot
 docker compose up -d --build
 docker compose logs -f
 ```
@@ -179,7 +198,6 @@ docker run --rm \
 Do this **only after** the Oracle bot replies in Telegram.
 
 ```bash
-gh variable set AUTO_RESTART --body false -R Farh4d979/mirror-bot
 git rm .github/workflows/bot.yml .github/workflows/keepalive.yml
 git commit -m "chore: move bot runtime to Oracle Cloud"
 git push
