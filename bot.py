@@ -672,7 +672,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.effective_message.reply_text(
         "<b>Mirror bot</b>\n\n"
-        "Send me a link, a magnet link, a <code>.torrent</code> file, or any file. "
+        "Send me a link or a magnet link. "
         + (
             "A GitHub Actions worker downloads it and uploads it to Gofile or "
             "Pixeldrain, then replies with the public link. This PC only handles "
@@ -681,9 +681,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else "I download it and upload it to Gofile or Pixeldrain, then reply "
             "with the public link.\n\n"
         )
-        + "Files sent directly in Telegram are uploaded too. Telegram bots can "
-        "download attachments up to 20 MB; send a link for anything larger. "
-        "You can also reply to a file with /gf or /px.\n\n"
+        + "To mirror a file or GIF that is already in the chat, reply to it with "
+        "<code>/gf</code> or <code>/px</code>. Other attachments are ignored. "
+        "Telegram bots can download replied attachments up to 20 MB; send a link "
+        "for anything larger.\n\n"
         "Any file type, Gofile share links, pages with a download button, video sites, "
         "image galleries, and public MEGA links are supported.\n\n"
         "<b>Commands</b>\n"
@@ -937,7 +938,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not source:
         if _authorized(update, settings):
             await message.reply_text(
-                "Send me a link, a magnet link, a .torrent file, or any file."
+                "Send me a link or a magnet link. To mirror a file or GIF, "
+                "reply to it with /gf or /px."
             )
         return
     if not _authorized(update, settings):
@@ -1069,20 +1071,6 @@ async def _mirror_attachment(
         host=host,
         dump_partitions=dump_partitions,
     )
-
-
-async def on_attachment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings: Settings = context.application.bot_data["settings"]
-    message = update.effective_message
-    if message is None:
-        return
-    attachment = _message_attachment(message)
-    if attachment is None:
-        return
-    if not _authorized(update, settings):
-        await _deny(update, settings)
-        return
-    await _mirror_attachment(update, context, message, attachment)
 
 
 # ---------------------------------------------------------------------- buttons
@@ -1242,7 +1230,6 @@ def _register(app: Application, settings: Settings, manager: JobManager) -> None
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("handoff", cmd_handoff))
-    app.add_handler(MessageHandler(filters.ATTACHMENT, on_attachment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_error_handler(on_error)

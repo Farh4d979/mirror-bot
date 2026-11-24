@@ -5,7 +5,7 @@ import datetime
 from types import SimpleNamespace
 
 import pytest
-from telegram import Chat, Message, MessageEntity, Update, User
+from telegram import Chat, Document, Message, MessageEntity, Update, User
 from telegram.constants import ChatType
 from telegram.ext import Application, ApplicationHandlerStop
 
@@ -309,6 +309,37 @@ def _build_dispatcher(monkeypatch, tmp_path, started):
 def _dispatch(app: Application, update: Update) -> None:
     update.message.set_bot(app.bot)
     asyncio.run(app.process_update(update))
+
+
+def _build_attachment_update(update_id: int = 1) -> Update:
+    document = Document(
+        file_id="file-1",
+        file_unique_id="unique-1",
+        file_name="hello.txt",
+    )
+    message = Message(
+        message_id=update_id,
+        date=datetime.datetime.now(datetime.timezone.utc),
+        chat=Chat(id=1, type=ChatType.PRIVATE),
+        from_user=User(id=1, first_name="User", is_bot=False),
+        document=document,
+    )
+    return Update(update_id=update_id, message=message)
+
+
+def test_unsolicited_attachment_is_ignored(monkeypatch, tmp_path):
+    started = []
+    app = _build_dispatcher(monkeypatch, tmp_path, started)
+    submitted = []
+
+    async def fake_submit(*args, **kwargs):
+        submitted.append((args, kwargs))
+
+    monkeypatch.setattr(bot, "_submit_job", fake_submit)
+    _dispatch(app, _build_attachment_update())
+
+    assert started == []
+    assert submitted == []
 
 
 def test_gate_does_not_swallow_private_commands(monkeypatch, tmp_path):

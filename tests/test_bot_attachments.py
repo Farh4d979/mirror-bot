@@ -106,15 +106,6 @@ class FakeAttachmentMessage:
         return status
 
 
-def make_update(document: FakeDocument):
-    return SimpleNamespace(
-        effective_user=SimpleNamespace(id=1),
-        effective_chat=SimpleNamespace(id=2),
-        effective_message=FakeAttachmentMessage(document),
-        callback_query=None,
-    )
-
-
 class FakeCommandMessage:
     def __init__(self, replied_to=None):
         self.reply_to_message = replied_to
@@ -151,8 +142,13 @@ def make_command_update(command_message: FakeCommandMessage):
     )
 
 
-def test_attachment_is_saved_and_submitted_as_telegram_file(tmp_path, monkeypatch):
-    update = make_update(FakeDocument("hello.txt", b"hello"))
+def test_gf_reply_to_animation_submits_telegram_file(tmp_path, monkeypatch):
+    animation = FakeDocument("funny.mp4", b"gif-data", mime_type="video/mp4")
+    replied = FakeAttachmentMessage(animation)
+    replied.document = None
+    replied.animation = animation
+    command = FakeCommandMessage(replied)
+    update = make_command_update(command)
     context = make_context(tmp_path)
     submitted = {}
 
@@ -160,21 +156,22 @@ def test_attachment_is_saved_and_submitted_as_telegram_file(tmp_path, monkeypatc
         submitted.update(kwargs)
 
     monkeypatch.setattr(bot, "_submit_job", fake_submit)
-    asyncio.run(bot.on_attachment(update, context))
+    asyncio.run(bot._cmd_link(update, context, command="gf"))
 
-    assert submitted["source"] == "hello.txt"
     assert submitted["source_kind"] == "telegram_file"
-    assert submitted["local_path"].read_bytes() == b"hello"
-    assert submitted["status_message"] is update.effective_message.statuses[0]
+    assert submitted["local_path"].read_bytes() == b"gif-data"
 
 
-def test_torrent_document_keeps_torrent_job(tmp_path, monkeypatch):
-    document = FakeDocument(
-        "ubuntu.torrent",
-        b"d4:infod4:name4:teste",
-        mime_type="application/x-bittorrent",
+def test_gf_reply_to_torrent_document_submits_torrent_job(tmp_path, monkeypatch):
+    replied = FakeAttachmentMessage(
+        FakeDocument(
+            "ubuntu.torrent",
+            b"d4:infod4:name4:teste",
+            mime_type="application/x-bittorrent",
+        )
     )
-    update = make_update(document)
+    command = FakeCommandMessage(replied)
+    update = make_command_update(command)
     context = make_context(tmp_path)
     submitted = {}
 
@@ -182,15 +179,18 @@ def test_torrent_document_keeps_torrent_job(tmp_path, monkeypatch):
         submitted.update(kwargs)
 
     monkeypatch.setattr(bot, "_submit_job", fake_submit)
-    asyncio.run(bot.on_attachment(update, context))
+    asyncio.run(bot._cmd_link(update, context, command="gf"))
 
     assert submitted["source_kind"] == "torrent_file"
     assert submitted["local_path"].name == "ubuntu.torrent"
 
 
-def test_large_telegram_attachment_is_rejected(tmp_path, monkeypatch):
-    document = FakeDocument("big.bin", b"", size=21 * 1024 * 1024)
-    update = make_update(document)
+def test_gf_reply_to_large_attachment_is_rejected(tmp_path, monkeypatch):
+    replied = FakeAttachmentMessage(
+        FakeDocument("big.bin", b"", size=21 * 1024 * 1024)
+    )
+    command = FakeCommandMessage(replied)
+    update = make_command_update(command)
     context = make_context(tmp_path)
     submitted = {}
 
@@ -198,10 +198,10 @@ def test_large_telegram_attachment_is_rejected(tmp_path, monkeypatch):
         submitted.update(kwargs)
 
     monkeypatch.setattr(bot, "_submit_job", fake_submit)
-    asyncio.run(bot.on_attachment(update, context))
+    asyncio.run(bot._cmd_link(update, context, command="gf"))
 
     assert not submitted
-    assert "20 MB" in update.effective_message.replies[0]
+    assert "20 MB" in command.replies[0]
 
 
 def test_gf_reply_to_file_submits_telegram_file(tmp_path, monkeypatch):

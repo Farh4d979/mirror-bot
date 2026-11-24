@@ -2,10 +2,10 @@
 
 A Telegram bot that takes a link or a file, downloads it if needed, and re-uploads it to **Gofile or Pixeldrain**.
 
-It handles direct file links, web pages where the file is hidden behind a "Download" button, video sites supported by yt-dlp, image galleries supported by gallery-dl, public MEGA links, magnet links, `.torrent` files, and files sent directly in Telegram.
+It handles direct file links, web pages where the file is hidden behind a "Download" button, video sites supported by yt-dlp, image galleries supported by gallery-dl, public MEGA links, magnet links, `.torrent` files, and Telegram attachments you reply to with `/gf` or `/px`.
 
 ```
-Telegram link / .torrent / file
+Telegram link / replied file
           │
           ▼
    Resolver (HTML buttons, meta refresh, data-url, JSON-LD, Google Drive, GitHub releases…)
@@ -30,7 +30,7 @@ Telegram link / .torrent / file
 - Public MEGA file and folder links through megatools (`megadl`).
 - Android partition dumps: `/gf <link> -dump boot,vendor` downloads an OTA zip or fastboot ROM, extracts only the requested images from `payload.bin` or `super.img`, and uploads each image separately.
 - Magnet links and `.torrent` files through aria2c (DHT enabled, seeding disabled).
-- Files sent directly in Telegram — documents, photos, video, audio, voice notes, animations and stickers — are uploaded to Gofile. Reply with `/px` to send them to Pixeldrain instead. Telegram's cloud Bot API limits bot downloads to 20 MB per attachment.
+- Telegram attachments — documents, photos, video, audio, voice notes, animations and stickers — are mirrored only when you reply to them with `/gf` or `/px`. Unsolicited media is ignored. Telegram's cloud Bot API limits bot downloads to 20 MB per attachment.
 - Gofile share links (`gofile.io/d/...`) resolve through Gofile's API using a temporary guest token. Folder links are supported; the bot downloads the largest file or every file in `MULTI_FILE_MODE=zip`.
 - Gofile guest uploads work with no account. An optional `GOFILE_TOKEN` uses your account. The bot does not reject a file by size on its own; Gofile's server enforces the plan limits.
 - Pixeldrain uploads (`/px`) use your Pixeldrain API key, with the free plan allowing 10 GB per file and Pro allowing 100 GB per file.
@@ -271,7 +271,7 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go and gallery-dl. D
 | `/id` | Show your Telegram user/chat ID |
 | `/handoff` | PC runner only: stop the local bot and start the Actions fallback |
 
-You can also send a link, a magnet link, a `.torrent` file, or any file directly. Files sent in Telegram are uploaded to Gofile; cloud bots can download attachments up to 20 MB. To mirror a file you already sent, reply to it with `/gf`, `/mirror`, or `/px`.
+Send a link or a magnet link directly. To mirror a file, GIF or `.torrent` that is already in the chat, reply to it with `/gf`, `/mirror`, or `/px`. Attachments sent without one of those commands are ignored. Cloud bots can download replied attachments up to 20 MB.
 
 In groups, use commands such as `/gf@YourBot <link>`. Plain links are ignored there so the bot does not reply to every message. Private chats are owner-only; a group is enabled while at least one `ALLOWED_USER_IDS` member is in it.
 
@@ -300,7 +300,7 @@ Extraction needs free disk space for the requested images, not for the whole `su
 | Source | Support |
 |---|---|
 | Direct file URLs (any type: `.zip`, `.iso`, `.apk`, `.pdf`, `.mp3`, `.mp4`, …) | ✅ aria2c |
-| Files sent to the bot in Telegram (documents, photos, video, audio, voice, stickers) | ✅ direct upload, ≤20 MB |
+| Telegram files replied to with `/gf` or `/px` (documents, photos, video, audio, voice, stickers) | ✅ direct upload, ≤20 MB |
 | Pages with a Download button | ✅ heuristic resolver |
 | GitHub releases | ✅ GitHub API picks the first asset |
 | Google Drive single files | ✅ converted to a direct download URL |
@@ -324,7 +324,7 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 
 **"That page does not expose a direct file"** — the page needs a login, CAPTCHA, or JavaScript that the resolver cannot execute. Try the original file URL.
 
-**A file sent in Telegram is rejected as too large** — Telegram's cloud Bot API only lets bots download attachments up to 20 MB. Send a direct link to the file instead; the bot can then mirror it up to the disk and Gofile limits (or `MAX_FILE_SIZE` if you set one).
+**A replied file is rejected as too large** - Telegram's cloud Bot API only lets bots download attachments up to 20 MB. Send a direct link to the file instead; the bot can then mirror it up to the disk and Gofile limits (or `MAX_FILE_SIZE` if you set one).
 
 **Gofile says the token is rejected** — remove `GOFILE_TOKEN` to use guest uploads, or create a fresh token from your Gofile profile.
 
