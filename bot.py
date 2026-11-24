@@ -36,6 +36,15 @@ from telegram.ext import (
 from mirror.config import Settings, load_settings
 from mirror.dumper import normalize_partitions, parse_dump_args
 from mirror.errors import DumpError
+from mirror.handoff import (
+    HandoffError,
+    current_branch,
+    dispatch_handoff,
+    read_offset,
+    resolve_repo,
+    sync_offset_from_origin,
+    take_over,
+)
 from mirror.jobs import Job, JobManager, new_job
 from mirror.state import load_state, save_state
 from mirror.uploaders import get_uploader
@@ -570,8 +579,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "(requires a free Pixeldrain API key)\n"
         "/status — active jobs\n"
         "/cancel — cancel your jobs\n"
-        "/id — show your Telegram ID\n\n"
-        "<b>Android partition dump</b>\n"
+        "/id — show your Telegram ID\n"
+        + (
+            "/handoff — stop the PC bot and start the GitHub Actions fallback\n"
+            if settings.local_mode
+            else ""
+        )
+        + "\n<b>Android partition dump</b>\n"
         "/gf &lt;link&gt; -dump boot,vendor — download an OTA zip / fastboot ROM, "
         "extract only those partition images from payload.bin or super.img, and "
         "upload them. Use <code>-dump</code> with spaces too: "
@@ -721,6 +735,52 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.effective_message.reply_text(f"Cancelling {count} job(s)…")
     else:
         await update.effective_message.reply_text("You have no active jobs.")
+
+
+async def cmd_handoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stop the PC runner so the on-demand Actions fallback can take over."""
+    settings: Settings = context.application.bot_data["settings"]
+    if not _authorized(update, settings):
+        await _deny(update, settings)
+        return
+
+    user = update.effective_user
+    if update.effective_chat and update.effective_chat.type != ChatType.PRIVATE:
+        await update.effective_message.reply_text(
+            "Use /handoff in a private chat with the bot."
+        )
+        return
+    if settings.allowed_user_ids and (
+        user is None or user.id not in settings.allowed_user_ids
+    ):
+        await update.effective_message.reply_text(
+            "Only the bot owner can hand over to GitHub Actions."
+        )
+        return
+    if not settings.local_mode:
+        await update.effective_message.reply_text(
+            "Handoff is only available when the bot is running on the PC."
+        )
+        return
+
+    manager: JobManager = context.application.bot_data["manager"]
+    if manager.active_jobs():
+        await update.effective_message.reply_text(
+            "Jobs are still running. Wait for them to finish or cancel them first."
+        )
+        return
+
+    stop_event = context.application.bot_data.get("stop_event")
+    if stop_event is None:
+        await update.effective_message.reply_text(
+            "The local runner is not ready for handoff yet."
+        )
+        return
+
+    await update.effective_message.reply_text(
+        "Stopping the PC bot. GitHub Actions will take over in about a minute."
+    )
+    stop_event.set()
 
 
 # --------------------------------------------------------------------- messages
@@ -898,18 +958,22 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def post_init(app: Application) -> None:
-    try:
-        await app.bot.set_my_commands(
-            [
-                BotCommand("start", "Welcome and usage"),
-                BotCommand("gf", "Upload to Gofile: /gf <link>"),
-                BotCommand("mirror", "Upload to Gofile: /mirror <link>"),
-                BotCommand("px", "Upload to Pixeldrain: /px <link>"),
-                BotCommand("status", "Show active jobs"),
-                BotCommand("cancel", "Cancel your jobs"),
-                BotCommand("id", "Show your Telegram ID"),
-            ]
+    settings: Settings = app.bot_data["settings"]
+    commands = [
+        BotCommand("start", "Welcome and usage"),
+        BotCommand("gf", "Upload to Gofile: /gf <link>"),
+        BotCommand("mirror", "Upload to Gofile: /mirror <link>"),
+        BotCommand("px", "Upload to Pixeldrain: /px <link>"),
+        BotCommand("status", "Show active jobs"),
+        BotCommand("cancel", "Cancel your jobs"),
+        BotCommand("id", "Show your Telegram ID"),
+    ]
+    if settings.local_mode:
+        commands.append(
+            BotCommand("handoff", "Stop the PC bot and start GitHub Actions")
         )
+    try:
+        await app.bot.set_my_commands(commands)
     except TelegramError:
         logger.warning("Could not set bot commands", exc_info=True)
 
@@ -931,13 +995,17 @@ def _register(app: Application, settings: Settings, manager: JobManager) -> None
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("handoff", cmd_handoff))
     app.add_handler(MessageHandler(filters.ATTACHMENT, on_attachment))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_error_handler(on_error)
 
 
-async def run_bot(settings: Settings) -> None:
+async def run_bot(
+    settings: Settings,
+    status: Optional[dict[str, bool]] = None,
+) -> None:
     manager = JobManager(settings)
     app = (
         Application.builder()
@@ -945,6 +1013,8 @@ async def run_bot(settings: Settings) -> None:
         .post_init(post_init)
         .build()
     )
+    stop_event = asyncio.Event()
+    app.bot_data["stop_event"] = stop_event
     _register(app, settings, manager)
     state = load_state(settings.state_file)
     app.bot_data["last_update_id"] = int(state.get("last_update_id", 0) or 0)
@@ -973,6 +1043,8 @@ async def run_bot(settings: Settings) -> None:
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=False,
     )
+    if status is not None:
+        status["polling"] = True
     logger.info(
         "Bot polling started (run_seconds=%s, max_file_size=%s, uploaders=Gofile%s)",
         settings.run_seconds or "unlimited",
@@ -980,7 +1052,6 @@ async def run_bot(settings: Settings) -> None:
         ",Pixeldrain" if settings.pixeldrain_api_key else "",
     )
 
-    stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -1032,10 +1103,38 @@ def main() -> None:
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("telegram.ext.Application").setLevel(logging.INFO)
+
+    repo: Optional[str] = None
+    ref: Optional[str] = None
+    if settings.local_mode:
+        try:
+            repo = resolve_repo(settings.actions_repo)
+            ref = settings.actions_ref or current_branch()
+            logger.info("Local mode: checking GitHub Actions (%s, %s).", repo, ref)
+            take_over(repo, branch=ref)
+            sync_offset_from_origin(settings.state_file, ref)
+        except HandoffError as exc:
+            logger.error("Cannot start the local bot: %s", exc)
+            raise SystemExit(1) from exc
+
+    status = {"polling": False}
     try:
-        asyncio.run(run_bot(settings))
+        asyncio.run(run_bot(settings, status))
     except KeyboardInterrupt:
         pass
+    finally:
+        if settings.local_mode and settings.auto_handoff and status["polling"]:
+            if repo is None or ref is None:
+                logger.error("Cannot start GitHub Actions: repository is unknown.")
+            else:
+                try:
+                    dispatch_handoff(repo, ref, read_offset(settings.state_file))
+                except HandoffError as exc:
+                    logger.error("Could not start the GitHub Actions fallback: %s", exc)
+                except Exception:
+                    logger.exception(
+                        "Unexpected error while starting the GitHub Actions fallback"
+                    )
 
 
 if __name__ == "__main__":

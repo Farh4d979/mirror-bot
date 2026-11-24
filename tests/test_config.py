@@ -37,3 +37,21 @@ def test_token_is_required(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     with pytest.raises(RuntimeError):
         load_settings()
+
+
+def test_local_mode_enables_automatic_handoff(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("LOCAL_MODE", "1")
+    monkeypatch.delenv("AUTO_HANDOFF", raising=False)
+    settings = load_settings()
+    assert settings.local_mode is True
+    assert settings.auto_handoff is True
+
+
+def test_auto_handoff_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("LOCAL_MODE", "1")
+    monkeypatch.setenv("AUTO_HANDOFF", "0")
+    settings = load_settings()
+    assert settings.local_mode is True
+    assert settings.auto_handoff is False

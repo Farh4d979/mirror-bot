@@ -6,6 +6,7 @@
 # Runtime data
 downloads/
 data/
+tools/
 .state/
 *.part
 *.aria2

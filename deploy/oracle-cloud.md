@@ -125,14 +125,13 @@ GitHub bot and the Oracle bot at the same time, or one of them will get
 Stop the GitHub fallback first. From your own computer:
 
 ```bash
-gh variable set AUTO_RESTART --body false -R Farh4d979/mirror-bot
-gh run list -R Farh4d979/mirror-bot --workflow bot.yml --limit 1
+gh run list -R Farh4d979/mirror-bot --workflow bot.yml --json databaseId,status
 gh run cancel <active-run-id> -R Farh4d979/mirror-bot
 ```
 
-You can also cancel the active run from the GitHub Actions page and set
-`AUTO_RESTART=false` under **Settings → Secrets and variables → Actions →
-Variables**.
+You can also cancel the active run from the GitHub Actions page. The workflow
+has no schedule and does not restart itself, so once the active run is gone it
+stays idle.
 
 Then, on the Oracle VM:
 
@@ -198,7 +197,7 @@ docker run --rm \
 Do this **only after** the Oracle bot replies in Telegram.
 
 ```bash
-git rm .github/workflows/bot.yml .github/workflows/keepalive.yml
+git rm .github/workflows/bot.yml
 git commit -m "chore: move bot runtime to Oracle Cloud"
 git push
 ```

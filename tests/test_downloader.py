@@ -512,9 +512,34 @@ def test_mega_uses_megadl(tmp_path, monkeypatch):
     assert command[-1] == "https://mega.nz/file/abc123#key"
 
 
+def test_mega_uses_megatools_dl_when_megadl_is_missing(tmp_path, monkeypatch):
+    downloader = Downloader(make_settings(tmp_path), CancelToken())
+    captured = {}
+    monkeypatch.setattr("mirror.downloader._tool_command", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "mirror.downloader.shutil.which",
+        lambda name: "C:/tools/megatools.exe" if name == "megatools" else None,
+    )
+
+    def fake_run_tool(command, dest, progress, *, label, on_line=None):
+        captured["command"] = command
+        (dest / "file.bin").write_bytes(b"x" * 10)
+
+    monkeypatch.setattr(downloader, "_run_tool", fake_run_tool)
+    downloader._mega(
+        "https://mega.nz/file/abc123#key",
+        tmp_path,
+        lambda percent, detail: None,
+    )
+
+    assert captured["command"][:2] == ["C:/tools/megatools.exe", "dl"]
+    assert captured["command"][-1] == "https://mega.nz/file/abc123#key"
+
+
 def test_mega_without_megatools_fails_clearly(tmp_path, monkeypatch):
     downloader = Downloader(make_settings(tmp_path), CancelToken())
     monkeypatch.setattr("mirror.downloader._tool_command", lambda *args, **kwargs: None)
+    monkeypatch.setattr("mirror.downloader.shutil.which", lambda name: None)
 
     with pytest.raises(DownloadError, match="megatools"):
         downloader._mega(

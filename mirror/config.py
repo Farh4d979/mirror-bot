@@ -50,6 +50,10 @@ class Settings:
     max_concurrent_jobs: int = 2
     job_timeout: int = 2 * 60 * 60
     run_seconds: int = 0
+    local_mode: bool = False
+    auto_handoff: bool = False
+    actions_repo: str | None = None
+    actions_ref: str | None = None
     download_dir: Path = Path("downloads")
     state_file: Path = Path(".state/telegram.json")
     gofile_token: str | None = None
@@ -78,6 +82,7 @@ def load_settings() -> Settings:
     cookies = os.getenv("COOKIES_FILE", "").strip()
     download_dir = Path(os.getenv("DOWNLOAD_DIR", "downloads")).expanduser()
     state_file = Path(os.getenv("STATE_FILE", ".state/telegram.json")).expanduser()
+    local_mode = _env_bool("LOCAL_MODE", False)
 
     return Settings(
         telegram_token=token,
@@ -86,6 +91,10 @@ def load_settings() -> Settings:
         max_concurrent_jobs=max(1, _env_int("MAX_CONCURRENT_JOBS", 2)),
         job_timeout=max(60, _env_int("JOB_TIMEOUT", 2 * 60 * 60)),
         run_seconds=max(0, _env_int("BOT_RUN_SECONDS", 0)),
+        local_mode=local_mode,
+        auto_handoff=_env_bool("AUTO_HANDOFF", local_mode),
+        actions_repo=os.getenv("ACTIONS_REPO", "").strip() or None,
+        actions_ref=os.getenv("ACTIONS_REF", "").strip() or None,
         download_dir=download_dir,
         state_file=state_file,
         gofile_token=os.getenv("GOFILE_TOKEN", "").strip() or None,

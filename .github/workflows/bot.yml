@@ -1,15 +1,28 @@
 name: Telegram Mirror Bot
 
+# On-demand fallback only. The normal runtime is the PC (see
+# deploy/windows-pc.md). The PC starts this workflow when it hands over and
+# cancels any active run when it takes the bot back. There is deliberately no
+# schedule and no self-queue: a run stops after its time limit instead of
+# keeping GitHub Actions busy forever.
+
 on:
-  schedule:
-    # Fallback if the automatic hand-off fails. Runs normally queue themselves.
-    - cron: "0 */5 * * *"
   workflow_dispatch:
     inputs:
       run_seconds:
         description: "Run for N seconds (blank = 17100)"
         required: false
         default: ""
+      offset:
+        description: "Last Telegram update offset (optional)"
+        required: false
+        default: ""
+      handoff:
+        description: "Started by the local PC runner"
+        type: boolean
+        default: false
+
+run-name: "Telegram Mirror Bot (${{ github.event.inputs.handoff == 'true' && 'PC handoff' || 'manual' }})"
 
 concurrency:
   group: telegram-mirror-bot
@@ -17,7 +30,6 @@ concurrency:
 
 permissions:
   contents: write
-  actions: write
 
 jobs:
   run:
@@ -43,6 +55,33 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Restore Telegram offset from the PC
+        if: github.event.inputs.offset != ''
+        env:
+          OFFSET: ${{ github.event.inputs.offset }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = os.environ["OFFSET"].strip()
+          if not raw.isdigit():
+              raise SystemExit("offset must be a non-negative integer")
+
+          path = Path(".state/telegram.json")
+          path.parent.mkdir(parents=True, exist_ok=True)
+          current = 0
+          if path.exists():
+              try:
+                  current = int(json.loads(path.read_text()).get("last_update_id", 0))
+              except (OSError, ValueError, TypeError):
+                  current = 0
+          path.write_text(
+              json.dumps({"last_update_id": max(current, int(raw))}, indent=2) + "\n"
+          )
+          PY
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -104,11 +143,6 @@ jobs:
             git reset --hard "origin/$BRANCH"
             mkdir -p .state
 
-            # Weekly heartbeat: GitHub disables scheduled workflows after 60
-            # days without repository activity, even if the bot is idle.
-            date -u +%Y-W%V > .state/heartbeat.txt
-            git add -f .state/heartbeat.txt
-
             if [ -n "$STATE_BACKUP" ]; then
               cp "$STATE_BACKUP" .state/telegram.json
               git add -f .state/telegram.json
@@ -132,17 +166,3 @@ jobs:
       - name: Clean downloads
         if: always()
         run: rm -rf "${{ runner.temp }}/mirror-downloads"
-
-      # Keep the bot online without a VPS. Dispatching while this run still
-      # holds the concurrency group queues the next run, so it starts as soon
-      # as this one exits. Telegram still sees only one poller at a time.
-      - name: Queue next run
-        if: >-
-          always() && !cancelled() &&
-          steps.bot.outcome == 'success' &&
-          steps.persist.outcome == 'success' &&
-          vars.AUTO_RESTART != 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: gh workflow run bot.yml --ref "${{ github.ref_name }}"

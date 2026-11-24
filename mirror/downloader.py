@@ -615,9 +615,15 @@ class Downloader:
     def _mega(self, url: str, dest: Path, progress: ProgressCB) -> DownloadResult:
         command = _tool_command("megadl")
         if not command:
+            # Newer Windows megatools builds ship one multi-call executable
+            # instead of a separate megadl.exe.
+            megatools = shutil.which("megatools")
+            if megatools:
+                command = [megatools, "dl"]
+        if not command:
             raise DownloadError(
-                "MEGA links need megatools. Install it with `apt install megatools` "
-                "(or use the Docker image) and restart the bot."
+                "MEGA links need megatools. Install megatools (with megadl or "
+                "megatools.exe on PATH) and restart the bot."
             )
 
         progress(None, "Downloading from MEGA…")

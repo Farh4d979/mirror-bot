@@ -37,15 +37,42 @@ Telegram link / .torrent / file
 - Pixeldrain file links (`pixeldrain.com/u/...`) are downloaded through Pixeldrain's API. When `PIXELDRAIN_API_KEY` is set, the bot authenticates the download so a Pro/Prepaid account uses its own transfer quota instead of the shared free per-IP quota.
 - Progress bars, cancel buttons, per-user job limits, size limits and timeouts.
 - Private DMs are restricted to `ALLOWED_USER_IDS`; groups work while at least one of those users is a member. Channels are ignored.
-- Runs on Docker or any small VPS. [Oracle Cloud Always Free](deploy/oracle-cloud.md) is the recommended free 24/7 host. GitHub Actions is supported as a fallback, but it is not intended to be a permanent bot host.
+- Runs on a Windows PC, Docker, or a small VPS. Telegram long polling means no open ports or domain are needed. GitHub Actions is supported as an **on-demand fallback**, not as the normal 24/7 host.
+- The PC runner can hand the bot to one GitHub Actions run when it exits, and takes the bot back (cancelling the run) when it starts again. See [deploy/windows-pc.md](deploy/windows-pc.md).
 
-## Recommended 24/7 deployment
+## Recommended: run on your PC
 
-For a permanent host with no monthly bill, follow [deploy/oracle-cloud.md](deploy/oracle-cloud.md). It runs the included Docker image on Oracle's Always Free ARM VM (currently about 2 OCPU / 12 GB RAM / 200 GB disk). After the Oracle bot is working, GitHub Actions is only needed for tests.
+The safest free setup is to run the bot on your own Windows PC and use GitHub
+Actions only when the PC explicitly hands over. The PC is the only normal
+Telegram poller; Actions is started on demand, runs for at most 4h45m, and does
+not restart itself.
 
-## Quick start on GitHub Actions (fallback)
+Follow [deploy/windows-pc.md](deploy/windows-pc.md). The short version:
 
-> GitHub Actions is not a true 24/7 host and running a persistent mirror bot there can conflict with GitHub's Actions terms. Use the Oracle/Docker deployment for normal use. Read [Actions limitations](#github-actions-limitations) before choosing this option.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
+# edit .env: TELEGRAM_BOT_TOKEN, ALLOWED_USER_IDS
+gh auth login
+scripts\run-local.cmd
+```
+
+The PC runner cancels any active Actions run before polling, so the two never
+fight over Telegram updates. On exit (Ctrl+C or `/handoff`) it starts one
+Actions run. If the PC loses power or is turned off without a handoff, the bot
+is offline until the PC comes back; Telegram keeps updates for 24 hours. That is
+the tradeoff for not depending on GitHub as an always-on server.
+
+If you have an always-on Linux box, the included Docker image is a good
+alternative. [deploy/oracle-cloud.md](deploy/oracle-cloud.md) describes Oracle
+Cloud's Always Free VM, but Oracle now requires card verification and may stop
+idle instances, so use it only if that suits you.
+
+## On-demand GitHub Actions fallback
+
+The workflow has **no schedule and no self-queue**. It only runs when the PC
+hands over or when you start it manually from **Actions → Telegram Mirror Bot →
+Run workflow**. A run stops after its time limit instead of keeping GitHub
+Actions busy indefinitely.
 
 1. **Create the repository** and push this folder to it.
 
@@ -58,7 +85,7 @@ For a permanent host with no monthly bill, follow [deploy/oracle-cloud.md](deplo
    git push -u origin main
    ```
 
-   A **public** repository is strongly recommended. Standard GitHub-hosted runners are free for public repositories; private repositories only get 2,000 minutes/month, which is not enough to run a bot all month.
+   A **public** repository is strongly recommended. Standard GitHub-hosted runners are free for public repositories; private repositories only get 2,000 minutes/month, which is not enough for long fallback runs.
 
 2. **Create the Telegram bot.** Talk to [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token.
 
@@ -73,31 +100,42 @@ For a permanent host with no monthly bill, follow [deploy/oracle-cloud.md](deplo
    | `GOFILE_TOKEN` | optional | Uses your Gofile account for uploads and share-link downloads instead of guest tokens |
    | `PIXELDRAIN_API_KEY` | optional | Required for `/px` uploads. Also authenticates Pixeldrain downloads; a Pro/Prepaid key uses the account's own transfer quota. |
 
-   Optional repository **variables** (Settings → Secrets and variables → Actions → Variables): `MAX_FILE_SIZE` (`0`, unlimited), `MAX_CONCURRENT_JOBS` (`1`), `JOB_TIMEOUT` (`7200`), `MULTI_FILE_MODE` (`largest`), `YTDLP_FORMAT` (`bv*+ba/b`), `GOFILE_WT_SALT` (only needed if Gofile rotates its website-token salt), `AUTO_RESTART` (`true`; set to `false` to stop the automatic hand-off).
+   Optional repository **variables** (Settings → Secrets and variables → Actions → Variables): `MAX_FILE_SIZE` (`0`, unlimited), `MAX_CONCURRENT_JOBS` (`1`), `JOB_TIMEOUT` (`7200`), `MULTI_FILE_MODE` (`largest`), `YTDLP_FORMAT` (`bv*+ba/b`), `GOFILE_WT_SALT` (only needed if Gofile rotates its website-token salt).
 
-5. **Enable Actions and run it.** Open the **Actions** tab → **Telegram Mirror Bot** → **Run workflow**. Leave `run_seconds` blank for the normal 4h45m run, or set a small value such as `60` for a short test. Wait for the job to start, then send your bot a link.
-
-6. **Send a link or a file.** The bot downloads the file if needed, uploads it to the destination you chose, and replies with the public link.
+5. **Start a fallback run only when needed.** Open the **Actions** tab → **Telegram Mirror Bot** → **Run workflow**. Leave `run_seconds` blank for 4h45m, or set a small value such as `60` for a test. The PC runner normally does this for you.
 
 ### GitHub Actions limitations
 
-- **One job is capped at 6 hours.** Each run polls for 4h45m (`BOT_RUN_SECONDS=17100`), then queues the next run before exiting. The 5-hour schedule is a fallback. A run that crashes without queuing is restarted by the keep-alive workflow within about 30 minutes. Messages sent while no run is active are delivered when the next run starts because Telegram keeps updates for 24 hours.
-- **Only one poller at a time.** Telegram allows a single `getUpdates` consumer per bot token, so the workflow's concurrency group serializes runs. A single run can still process several uploads concurrently via `MAX_CONCURRENT_JOBS`.
-- **Cron is not exact.** GitHub can delay scheduled runs by several minutes.
-- **Private repos run out of minutes.** 2,000 minutes/month is roughly 33 hours; this bot needs ~720 hours/month. Use a public repo or a real host.
-- **Disk is limited.** The standard runner has about 14 GB of SSD. The bot no longer imposes a file-size cap by default (`MAX_FILE_SIZE=0`), but a single file must still fit on the runner; the practical ceiling is roughly 12 GB. Gofile's own plan limits also apply: guest accounts allow 1 GB per file, free verified accounts 5 GB per file, and paid plans more. Set `MAX_FILE_SIZE` if you want a hard cap, and keep `MAX_CONCURRENT_JOBS=1` when mirroring large files.
-- **Scheduled workflows can be disabled after 60 days without repository activity.** This workflow commits `.state/telegram.json` after each run, which keeps the repository active and also resumes the Telegram update offset.
-- **State commits.** The workflow pushes a tiny state commit (`chore: update bot state [skip ci]`) when the Telegram offset changes, plus a weekly heartbeat so GitHub does not disable the schedule after 60 idle days. If `main` is protected, allow GitHub Actions to push, or change the workflow to use a cache instead.
+- **One job is capped at 6 hours.** A fallback run polls for 4h45m (`BOT_RUN_SECONDS=17100`) and exits. It does not queue a successor. Start another run only if you still need the fallback.
+- **Only one poller at a time.** Telegram allows a single `getUpdates` consumer per bot token. The PC runner cancels active runs and waits before it starts polling; if you run both, one gets `409 Conflict`.
+- **No automatic failover.** If the PC crashes, sleeps, or loses power without a handoff, nothing starts Actions. Telegram keeps updates for 24 hours, so they are delivered when the PC returns.
+- **Private repos run out of minutes.** 2,000 minutes/month is roughly 33 hours. Use a public repo for fallback runs, or keep the runtime on the PC.
+- **Disk is limited.** The standard runner has about 14 GB of SSD. A single file must fit on the runner; the practical ceiling is roughly 12 GB. Set `MAX_FILE_SIZE` if you want a hard cap, and keep `MAX_CONCURRENT_JOBS=1` when mirroring large files.
+- **State commits.** The workflow pushes a tiny state commit (`chore: update bot state [skip ci]`) when the Telegram offset changes. If `main` is protected, allow GitHub Actions to push, or change the workflow to use a cache instead. The PC passes its current offset into the fallback run so already-handled updates are not replayed.
 - **Actions logs are public in a public repo.** Do not print tokens; the bot does not log them.
-- **No inbound webhook.** The bot uses long polling, so it only handles messages while a workflow run is active. The keep-alive workflow starts runs; it does not receive messages itself.
-- **Datacenter IPs get blocked.** YouTube and other video sites often ask for a sign-in from GitHub's IPs, and BitTorrent traffic may be throttled. For heavy video/torrent use, run the Docker image on a VPS.
-- **End-of-run grace period.** The bot stops accepting new jobs when its run is ending and waits up to 20 minutes for active jobs to finish.
-
-The automatic hand-off makes Actions effectively continuous, but it is still best-effort: GitHub can delay or disable schedules, and a run that fails before the hand-off waits for the keep-alive check. For guaranteed 24/7 operation, use the [Oracle Cloud Always Free guide](deploy/oracle-cloud.md) or deploy the included Docker image to a small VPS.
+- **No inbound webhook.** The bot uses long polling, so it only handles messages while the PC or a fallback run is active.
+- **Datacenter IPs get blocked.** YouTube and other video sites often ask for a sign-in from GitHub's IPs, and BitTorrent traffic may be throttled. The PC's home connection is usually better for video sites.
+- **End-of-run grace period.** A fallback run stops accepting new jobs before its time limit and waits up to 20 minutes for active jobs to finish.
+- **Terms of service.** GitHub Actions is intended for the repository's own software work. An occasional, owner-only fallback is much less risky than a 24/7 public mirror service, but it is not guaranteed to be exempt from GitHub's limits. The PC is the normal host for a reason.
 
 ## Local setup
 
-Requirements: Python 3.10+ (3.12 recommended), [aria2](https://aria2.github.io/) and ffmpeg. Without aria2, direct HTTP downloads still work through Python, but torrents/magnets do not. MEGA links additionally need megatools (`megadl`). `-dump` extraction needs [payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases) and `xz`; gallery-dl and yt-dlp are installed from `requirements.txt`.
+Requirements: Python 3.10+ (3.12 recommended), [aria2](https://aria2.github.io/) and ffmpeg. Without aria2, direct HTTP downloads still work through Python, but torrents/magnets do not. MEGA links additionally need megatools (`megadl`, or the newer Windows `megatools.exe`). `-dump` extraction needs [payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases); gallery-dl and yt-dlp are installed from `requirements.txt`.
+
+On Windows, the setup script installs aria2, ffmpeg, megatools,
+payload-dumper-go, creates `.venv`, and installs the Python dependencies:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
+# edit .env and set TELEGRAM_BOT_TOKEN and ALLOWED_USER_IDS
+gh auth login
+scripts\run-local.cmd
+```
+
+See [deploy/windows-pc.md](deploy/windows-pc.md) for handoff behavior,
+auto-start, and troubleshooting.
+
+Generic manual setup:
 
 ```bash
 python -m venv .venv
@@ -112,14 +150,7 @@ cp .env.example .env
 python -m bot
 ```
 
-Install the system tools:
-
-```powershell
-# Windows
-winget install aria2.aria2
-winget install Gyan.FFmpeg
-# MEGA links need megatools; use WSL or the Docker image on Windows.
-```
+Install the system tools on Linux/macOS:
 
 ```bash
 # Debian/Ubuntu
@@ -128,11 +159,20 @@ sudo apt update && sudo apt install -y aria2 ffmpeg megatools
 brew install aria2 ffmpeg megatools
 ```
 
+`LOCAL_MODE=1` enables the PC handoff logic. The normal local runner sets it
+automatically, uses `.state/local-telegram.json` to keep the tracked Actions
+state clean, and requires `gh auth login`. Set `LOCAL_MODE=0` or run
+`scripts\run-local.cmd nohandoff` if you want a plain local bot without GitHub
+coordination.
+
+
 ## Docker
 
-The included `docker-compose.yml` is the recommended way to run the bot. It
-uses a persistent volume for `/data`, restarts the container after a reboot,
-and builds natively on both x86_64 and ARM64 (including Oracle's Ampere VM).
+The included `docker-compose.yml` is a convenient alternative for an
+always-on Linux host. It uses a persistent volume for `/data`, restarts the
+container after a reboot, and builds natively on both x86_64 and ARM64. Do not
+run it at the same time as the Windows PC runner or a GitHub Actions fallback;
+each is an independent Telegram poller.
 
 ```bash
 cp .env.example .env
@@ -169,12 +209,16 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go and gallery-dl. D
 | `MAX_FILE_SIZE` | `0` | Maximum downloaded file size; `0` = no bot-side limit |
 | `MAX_CONCURRENT_JOBS` | `2` | Parallel jobs (`1` in the Actions workflow) |
 | `JOB_TIMEOUT` | `7200` | Per-job timeout in seconds |
-| `BOT_RUN_SECONDS` | `0` | Stop after N seconds; `0` = run until stopped |
+| `BOT_RUN_SECONDS` | `0` | Stop after N seconds; `0` = run until stopped. Actions fallback runs use `17100`. |
+| `LOCAL_MODE` | `0` | `1` = PC-primary mode: cancel active Actions runs on startup and coordinate handoff. |
+| `AUTO_HANDOFF` | `LOCAL_MODE` | Start one Actions fallback when the PC runner exits. `0` disables the handoff. |
+| `ACTIONS_REPO` | detected | Optional `owner/name` for handoff; normally read from the current `gh` login. |
+| `ACTIONS_REF` | current branch | Optional branch that the fallback workflow should run. |
 | `MULTI_FILE_MODE` | `largest` | For torrents/multi-file downloads: upload the largest file, or `zip` everything |
 | `YTDLP_FORMAT` | `bv*+ba/b` | yt-dlp format selector |
 | `COOKIES_FILE` | empty | Optional Netscape cookies file for restricted video sites and galleries |
 | `DOWNLOAD_DIR` | `downloads` | Temporary download directory |
-| `STATE_FILE` | `.state/telegram.json` | Telegram offset state |
+| `STATE_FILE` | `.state/telegram.json` | Telegram offset state. The PC runner uses `.state/local-telegram.json`. |
 | `ARIA2C_PATH` | `aria2c` | Path to the aria2c binary |
 | `PAYLOAD_DUMPER_PATH` | `payload-dumper-go` | Path to payload-dumper-go, used by `-dump` |
 | `ALLOW_PRIVATE_URLS` | `0` | **Dangerous.** Allows localhost/private IP links. Keep off in production. |
@@ -192,6 +236,7 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go and gallery-dl. D
 | `/status` | Active jobs |
 | `/cancel` | Cancel your active jobs |
 | `/id` | Show your Telegram user/chat ID |
+| `/handoff` | PC runner only: stop the local bot and start the Actions fallback |
 
 You can also send a link, a magnet link, a `.torrent` file, or any file directly. Files sent in Telegram are uploaded to Gofile; cloud bots can download attachments up to 20 MB. To mirror a file you already sent, reply to it with `/gf`, `/mirror`, or `/px`.
 
@@ -215,7 +260,7 @@ If a logical partition exists in both slots, `-dump vendor` picks `vendor_a` (sl
 
 `-dump` works with both `/gf` and `/px`, and with a file you reply to.
 
-Extraction needs free disk space for the requested images, not for the whole `super.img`, but the downloaded ROM is kept until the job finishes. payload-dumper-go is installed by the GitHub Actions workflow and the Docker image. For a local run, download it from [ssut/payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases), put it on `PATH` (or set `PAYLOAD_DUMPER_PATH`), and install `xz`.
+Extraction needs free disk space for the requested images, not for the whole `super.img`, but the downloaded ROM is kept until the job finishes. payload-dumper-go is installed by the GitHub Actions workflow, the Docker image, and `scripts\setup-windows.ps1`. For a manual local run, download it from [ssut/payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases), put it on `PATH` (or set `PAYLOAD_DUMPER_PATH`), and install `xz` if your payloads need it.
 
 ## Supported links
 
@@ -262,23 +307,27 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 
 **A Gofile share link fails** — the bot reads share links with a temporary guest token, so no account is needed. Password-protected folders are not supported. If Gofile changes its website-token salt, set `GOFILE_WT_SALT` to the current value from `https://gofile.io/js/wt.obf.js`; the default is `12af056dacea0b`.
 
-**Torrents do not start** — install aria2c (`aria2c --version`) and make sure the workflow/Docker image includes it. A magnet with no seeders stops after 5 minutes (`--bt-stop-timeout=300`).
+**Torrents do not start** — install aria2c (`aria2c --version`) and make sure the PC tools, workflow, or Docker image includes it. A magnet with no seeders stops after 5 minutes (`--bt-stop-timeout=300`).
 
-**Video download fails** - update yt-dlp (`pip install -U yt-dlp`). Age/region-locked sites may need `COOKIES_FILE`. GitHub Actions IPs are frequently blocked by YouTube; a VPS is more reliable for video sites.
+**Video download fails** - update yt-dlp (`pip install -U yt-dlp`). Age/region-locked sites may need `COOKIES_FILE`. GitHub Actions IPs are frequently blocked by YouTube; the PC's home connection is usually better.
 
 **Gallery download fails** - update gallery-dl (`pip install -U gallery-dl`). Login-only galleries may need `COOKIES_FILE`. Direct image URLs still go through aria2c and do not need gallery-dl.
 
-**MEGA download fails** - install megatools (`apt install megatools`). The link must be a public/exported file or folder link, and MEGA transfer quotas still apply.
+**MEGA download fails** - install megatools (`apt install megatools`, or run `scripts\setup-windows.ps1` on Windows). Newer Windows builds provide `megatools.exe` instead of `megadl.exe`; the bot handles both. The link must be a public/exported file or folder link, and MEGA transfer quotas still apply.
 
-**Torrents do not connect** — many datacenter networks block BitTorrent. Try a VPS, or use a direct link.
+**Torrents do not connect** — many datacenter networks block BitTorrent. The PC's connection is usually better than a cloud runner. Try a direct link if it still fails.
 
-**The Actions run stops after 4h45m** — that is expected. The run queues its successor before exiting, so the bot normally comes back within a minute or two. The keep-alive workflow also checks every 30 minutes.
+**The Actions run stops after 4h45m** — that is expected. On-demand runs do not queue a successor. Start another run only if you still need the fallback; otherwise let the PC take over.
 
-**The bot is offline for more than 30 minutes** — open the Actions tab and check for failed runs. If the `Queue next run` step failed, the keep-alive workflow should start a new run within 30 minutes; you can also run the workflow manually. To stop automatic restarts, set the repository variable `AUTO_RESTART` to `false` (this stops both the hand-off and the keep-alive) and disable the workflow.
+**The bot is offline** — first check whether the PC runner is running (`scripts\run-local.cmd`). If the PC is off, nothing starts the fallback automatically. Start the workflow manually from the Actions tab, or turn the PC on. Telegram keeps updates for 24 hours.
+
+**`409 Conflict`** — another process is polling the same bot token. Run `gh run list --workflow bot.yml` and cancel any active run before starting the PC bot, or stop the PC bot before starting an Actions run. The PC runner normally does this automatically.
+
+**The handoff did not start** — check `gh auth status` and that the repository is correct (`ACTIONS_REPO`). The PC logs the `gh` error. You can also start the workflow manually from the Actions tab.
 
 **The state push fails** — the repository's default branch is probably protected. Allow GitHub Actions to push, or replace the state step with `actions/cache` restore/save.
 
-**Disk full** — set `MAX_FILE_SIZE` to a value that fits the runner and keep `MAX_CONCURRENT_JOBS=1`. Each job deletes its temporary files when it finishes.
+**Disk full** — set `MAX_FILE_SIZE` to a value that fits the PC or runner and keep `MAX_CONCURRENT_JOBS=1`. Each job deletes its temporary files when it finishes.
 
 ## Security and legal notes
 
@@ -304,6 +353,7 @@ The tests cover URL/filename handling, the HTML download-button resolver, Gofile
 bot.py                     Telegram handlers and polling lifecycle
 mirror/
   config.py                Environment settings
+  handoff.py               PC ↔ GitHub Actions takeover and state offset sync
   resolver.py              Page → direct link
   downloader.py            aria2c / yt-dlp / requests engines
   jobs.py                  Queue, progress state, download → upload pipeline
@@ -312,12 +362,16 @@ mirror/
     gofile.py              Gofile upload fleet API
     pixeldrain.py          Pixeldrain raw PUT uploader
 .github/workflows/
-  bot.yml                  Optional GitHub Actions bot fallback
-  keepalive.yml            Restarts the GitHub Actions fallback
+  bot.yml                  On-demand GitHub Actions fallback
   tests.yml                Unit tests
 deploy/
-  oracle-cloud.md          Free 24/7 Oracle Cloud deployment guide
-docker-compose.yml         Recommended Docker deployment
+  windows-pc.md            Recommended Windows PC + fallback guide
+  oracle-cloud.md          Optional Oracle Cloud Always Free guide
+scripts/
+  setup-windows.ps1        Installs Windows tools and Python dependencies
+  run-local.cmd            Starts the PC runner and enables handoff
+  install-startup-task.ps1 Starts the PC runner at logon
+docker-compose.yml         Alternative Docker deployment
 Dockerfile                 aria2 + ffmpeg + bot (x86_64 and ARM64)
 ```
 

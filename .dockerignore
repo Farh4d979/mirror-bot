@@ -3,6 +3,7 @@
 .env
 downloads
 data
+tools
 .state
 __pycache__
 *.pyc
