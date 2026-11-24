@@ -37,11 +37,15 @@ Telegram link / .torrent / file
 - Pixeldrain file links (`pixeldrain.com/u/...`) are downloaded through Pixeldrain's API. When `PIXELDRAIN_API_KEY` is set, the bot authenticates the download so a Pro/Prepaid account uses its own transfer quota instead of the shared free per-IP quota.
 - Progress bars, cancel buttons, per-user job limits, size limits and timeouts.
 - Private DMs are restricted to `ALLOWED_USER_IDS`; groups work while at least one of those users is a member. Channels are ignored.
-- Runs on GitHub Actions with automatic run hand-off, Docker, or any small VPS.
+- Runs on Docker or any small VPS. [Oracle Cloud Always Free](deploy/oracle-cloud.md) is the recommended free 24/7 host. GitHub Actions is supported as a fallback, but it is not intended to be a permanent bot host.
 
-## Quick start on GitHub Actions
+## Recommended 24/7 deployment
 
-> GitHub Actions is not a true 24/7 host. Read [Actions limitations](#github-actions-limitations) before choosing it.
+For a permanent host with no monthly bill, follow [deploy/oracle-cloud.md](deploy/oracle-cloud.md). It runs the included Docker image on Oracle's Always Free ARM VM (currently about 2 OCPU / 12 GB RAM / 200 GB disk). After the Oracle bot is working, GitHub Actions is only needed for tests.
+
+## Quick start on GitHub Actions (fallback)
+
+> GitHub Actions is not a true 24/7 host and running a persistent mirror bot there can conflict with GitHub's Actions terms. Use the Oracle/Docker deployment for normal use. Read [Actions limitations](#github-actions-limitations) before choosing this option.
 
 1. **Create the repository** and push this folder to it.
 
@@ -89,7 +93,7 @@ Telegram link / .torrent / file
 - **Datacenter IPs get blocked.** YouTube and other video sites often ask for a sign-in from GitHub's IPs, and BitTorrent traffic may be throttled. For heavy video/torrent use, run the Docker image on a VPS.
 - **End-of-run grace period.** The bot stops accepting new jobs when its run is ending and waits up to 20 minutes for active jobs to finish.
 
-The automatic hand-off makes Actions effectively continuous, but it is still best-effort: GitHub can delay or disable schedules, and a run that fails before the hand-off waits for the keep-alive check. For guaranteed 24/7 operation, deploy the included Docker image to a VPS, Render, Railway, Fly.io, or similar.
+The automatic hand-off makes Actions effectively continuous, but it is still best-effort: GitHub can delay or disable schedules, and a run that fails before the hand-off waits for the keep-alive check. For guaranteed 24/7 operation, use the [Oracle Cloud Always Free guide](deploy/oracle-cloud.md) or deploy the included Docker image to a small VPS.
 
 ## Local setup
 
@@ -125,6 +129,23 @@ brew install aria2 ffmpeg megatools
 ```
 
 ## Docker
+
+The included `docker-compose.yml` is the recommended way to run the bot. It
+uses a persistent volume for `/data`, restarts the container after a reboot,
+and builds natively on both x86_64 and ARM64 (including Oracle's Ampere VM).
+
+```bash
+cp .env.example .env
+# edit .env and set TELEGRAM_BOT_TOKEN and ALLOWED_USER_IDS
+
+docker compose up -d --build
+docker compose logs -f
+```
+
+Stop it with `docker compose down` (`down -v` also deletes the downloads and
+state volume).
+
+Manual alternative without Compose:
 
 ```bash
 docker build -t mirror-bot .
@@ -291,9 +312,13 @@ mirror/
     gofile.py              Gofile upload fleet API
     pixeldrain.py          Pixeldrain raw PUT uploader
 .github/workflows/
-  bot.yml                  Scheduled bot run on GitHub Actions
+  bot.yml                  Optional GitHub Actions bot fallback
+  keepalive.yml            Restarts the GitHub Actions fallback
   tests.yml                Unit tests
-Dockerfile                 aria2 + ffmpeg + bot
+deploy/
+  oracle-cloud.md          Free 24/7 Oracle Cloud deployment guide
+docker-compose.yml         Recommended Docker deployment
+Dockerfile                 aria2 + ffmpeg + bot (x86_64 and ARM64)
 ```
 
 ## License

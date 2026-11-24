@@ -1,0 +1,25 @@
+services:
+  bot:
+    build:
+      context: .
+    image: mirror-bot:local
+    container_name: mirror-bot
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DOWNLOAD_DIR: /data/downloads
+      STATE_FILE: /data/state/telegram.json
+      BOT_RUN_SECONDS: "0"
+    volumes:
+      - mirror-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    stop_grace_period: 45s
+
+volumes:
+  mirror-data:

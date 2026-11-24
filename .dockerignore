@@ -2,6 +2,7 @@
 .github
 .env
 downloads
+data
 .state
 __pycache__
 *.pyc
