@@ -37,7 +37,6 @@ jobs:
       REMOTE_PAYLOAD: ${{ github.event.inputs.payload }}
       REMOTE_JOB_ID: ${{ github.event.inputs.job_id }}
       GOFILE_WT_SALT: ${{ vars.GOFILE_WT_SALT || '12af056dacea0b' }}
-      DOWNLOAD_DIR: ${{ runner.temp }}/mirror-downloads
       LOG_LEVEL: INFO
 
     steps:
@@ -74,6 +73,8 @@ jobs:
         run: df -h /
 
       - name: Run mirror job
+        env:
+          DOWNLOAD_DIR: ${{ runner.temp }}/mirror-downloads
         run: python -m mirror.worker
 
       - name: Clean downloads
