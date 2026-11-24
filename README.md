@@ -184,13 +184,15 @@ Supported sources inside the download:
 
 | Source | How it is handled |
 |---|---|
-| OTA `.zip` containing `payload.bin` (full or incremental) | `payload-dumper-go` extracts only the selected partitions |
+| OTA `.zip` containing `payload.bin` (full OTA, or a partial payload that needs no source images) | `payload-dumper-go` extracts only the selected partitions |
 | Raw `payload.bin` | Same as above |
 | Fastboot ROM `.zip` / `.tar` / `.tar.gz` / `.tgz` containing `super.img` | The LP metadata is parsed and only the requested extents are copied (sparse `super.img` works too) |
 | Raw or already-extracted `boot.img`, `vendor.img`, … | Used directly |
 | ZIP/TAR containing raw partition images | Only the matching `.img` members are extracted |
 
-If a logical partition exists in both slots, `-dump vendor` picks `vendor_a` (slot A); ask for `vendor_a,vendor_b` to get both. File names in the result are the actual partition names, so `vendor` may produce `vendor_a.img`. Partitions that were requested but do not exist are listed in the final message; if none exist, the job fails with the available partition names. `7z`/`RAR`, `.lz4` members and Samsung `.tar.md5` firmware are not supported — extract those first.
+If a logical partition exists in both slots, `-dump vendor` picks `vendor_a` (slot A); ask for `vendor_a,vendor_b` to get both. File names in the result are the actual partition names, so `vendor` may produce `vendor_a.img`. Partitions that were requested but do not exist are listed in the final message; if none exist, the job fails with the available partition names. Incremental (delta) OTAs need the previous firmware and are not supported. `7z`/`RAR`, `.lz4` members and Samsung `.tar.md5` firmware are not supported — extract those first.
+
+`-dump` works with both `/gf` and `/px`, and with a file you reply to.
 
 Extraction needs free disk space for the requested images, not for the whole `super.img`, but the downloaded ROM is kept until the job finishes. payload-dumper-go is installed by the GitHub Actions workflow and the Docker image. For a local run, download it from [ssut/payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases), put it on `PATH` (or set `PAYLOAD_DUMPER_PATH`), and install `xz`.
 
