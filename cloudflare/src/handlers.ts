@@ -151,12 +151,28 @@ async function reply(
 ): Promise<void> {
   try {
     await deps.tg.sendMessage(message.chat.id, text, keyboard, message.message_id);
-  } catch {
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        level: "warn",
+        msg: "Could not send Telegram reply",
+        chat_id: message.chat.id,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
     // A reply failure should not retry the whole Telegram update forever.
   }
 }
 
 async function deny(deps: HandlerDeps, message: TgMessage, userId: number): Promise<void> {
+  console.log(
+    JSON.stringify({
+      level: "warn",
+      msg: "Denied user",
+      user_id: userId,
+      chat_id: message.chat.id,
+    }),
+  );
   await reply(deps, message, renderDenied(userId));
 }
 
@@ -464,8 +480,30 @@ async function submitJob(
     );
     return;
   }
-  if (!reserved.created) return;
+  if (!reserved.created) {
+    console.log(
+      JSON.stringify({
+        level: "info",
+        msg: "Duplicate job dispatch ignored",
+        job_id: reserved.job.id,
+        dispatch_key: updateId,
+      }),
+    );
+    return;
+  }
   let job = reserved.job;
+  console.log(
+    JSON.stringify({
+      level: "info",
+      msg: "Submitting job",
+      job_id: job.id,
+      chat_id: job.chatId,
+      user_id: job.userId,
+      host: job.host,
+      source_kind: job.sourceKind,
+      dump_partitions: job.dumpPartitions.length,
+    }),
+  );
 
   let sent: { message_id: number };
   try {
@@ -475,6 +513,15 @@ async function submitJob(
       cancelKeyboard(job.id),
     );
   } catch (error) {
+    console.log(
+      JSON.stringify({
+        level: "error",
+        msg: "Could not create the job message",
+        job_id: job.id,
+        chat_id: job.chatId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
     await deps.store.remove(job.id);
     await reply(
       deps,
@@ -501,6 +548,14 @@ async function submitJob(
 
   try {
     const { runId, runUrl } = await deps.gh.dispatch(token, job.id);
+    console.log(
+      JSON.stringify({
+        level: "info",
+        msg: "Dispatched job",
+        job_id: job.id,
+        run_id: runId,
+      }),
+    );
     job =
       (await deps.store.attachRun(job.id, runId, runUrl)) || {
         ...job,
@@ -530,6 +585,14 @@ async function failDispatch(
   error: unknown,
 ): Promise<void> {
   const reason = error instanceof Error ? error.message : String(error);
+  console.log(
+    JSON.stringify({
+      level: "error",
+      msg: "Dispatch failed",
+      job_id: job.id,
+      error: reason,
+    }),
+  );
   const now = nowSeconds(deps);
   const failed = {
     ...job,

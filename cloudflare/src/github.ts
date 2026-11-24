@@ -29,10 +29,14 @@ export interface RunInfo {
 }
 
 export class GitHubAPI {
-  constructor(
-    private readonly config: GitHubConfig,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+  private readonly config: GitHubConfig;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(config: GitHubConfig, fetchImpl: typeof fetch = fetch) {
+    this.config = config;
+    this.fetchImpl = ((...args: Parameters<typeof fetch>) =>
+      fetchImpl.call(globalThis, ...args)) as typeof fetch;
+  }
 
   private repoPath(): string {
     return this.config.repo

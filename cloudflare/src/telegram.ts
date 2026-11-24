@@ -21,10 +21,14 @@ interface ApiResponse<T> {
 }
 
 export class TelegramAPI {
-  constructor(
-    private readonly token: string,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+  private readonly token: string;
+  private readonly fetchImpl: typeof fetch;
+
+  constructor(token: string, fetchImpl: typeof fetch = fetch) {
+    this.token = token;
+    this.fetchImpl = ((...args: Parameters<typeof fetch>) =>
+      fetchImpl.call(globalThis, ...args)) as typeof fetch;
+  }
 
   async call<T>(method: string, body: Record<string, unknown> = {}): Promise<T> {
     let response: Response;
