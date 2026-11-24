@@ -160,7 +160,7 @@ class ResolvedLink:
     referer: Optional[str] = None
     content_type: Optional[str] = None
     size: Optional[int] = None
-    kind: str = "http"  # http | torrent | magnet | ytdlp | gallery | mega
+    kind: str = "http"  # http | torrent | torrent_file | magnet | ytdlp | gallery | mega
     headers: Optional[dict[str, str]] = None
     parts: list[ResolvedLink] = field(default_factory=list)
     allow_ytdlp_fallback: bool = True

@@ -4,6 +4,7 @@ import pytest
 
 import mirror.jobs as jobs_module
 from mirror.config import Settings
+from mirror.downloader import DownloadResult
 from mirror.dumper import ExtractionResult
 from mirror.errors import DownloadError, FileTooLarge, NoFallbackResolutionError
 from mirror.jobs import JobManager, new_job
@@ -66,6 +67,49 @@ def test_telegram_file_is_uploaded_without_resolving(tmp_path, monkeypatch):
     assert job.file_size == 8
     assert not source.exists()
     assert not source.parent.exists()
+
+
+def test_torrent_file_pipeline_uses_local_torrent_kind(tmp_path, monkeypatch):
+    settings = Settings(telegram_token="test", download_dir=tmp_path)
+    manager = JobManager(settings)
+    source = tmp_path / "uploads" / "token" / "file.torrent"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"torrent-bytes")
+    seen = {}
+
+    class FakeUploader:
+        name = "gofile"
+
+        def available(self):
+            return True, ""
+
+        def upload(self, path, progress, cancel):
+            return UploadResult(url="https://gofile.io/d/torrent", host="Gofile")
+
+    def fake_download(self, *, original_url, link, dest, progress):
+        seen["kind"] = link.kind
+        dest.mkdir(parents=True, exist_ok=True)
+        path = dest / "movie.mkv"
+        path.write_bytes(b"data")
+        return DownloadResult(path=path, size=4)
+
+    monkeypatch.setattr(jobs_module, "get_uploader", lambda host, cfg: FakeUploader())
+    monkeypatch.setattr(jobs_module.Downloader, "download", fake_download)
+
+    job = new_job(
+        user_id=1,
+        chat_id=1,
+        source="file.torrent",
+        host="gofile",
+        source_kind="torrent_file",
+        local_path=source,
+    )
+    manager._pipeline(job)
+
+    assert seen["kind"] == "torrent_file"
+    assert job.result is not None
+    assert job.result.url == "https://gofile.io/d/torrent"
+    assert not source.exists()
 
 
 def test_telegram_file_above_configured_limit_fails(tmp_path):

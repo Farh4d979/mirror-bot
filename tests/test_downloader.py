@@ -29,6 +29,33 @@ def make_settings(tmp_path, **overrides) -> Settings:
     return Settings(**values)
 
 
+def test_local_torrent_uses_torrent_file_option(tmp_path, monkeypatch):
+    torrent = tmp_path / "upload.torrent"
+    torrent.write_bytes(b"torrent-bytes")
+    dest = tmp_path / "files"
+    dest.mkdir()
+    downloader = Downloader(make_settings(tmp_path), CancelToken())
+    calls = []
+
+    def fake_run(args, target, progress, *, label):
+        calls.append((list(args), label))
+        (target / "payload.bin").write_bytes(b"data")
+
+    monkeypatch.setattr(downloader, "_run_aria2", fake_run)
+    result = downloader.download(
+        original_url="upload.torrent",
+        link=ResolvedLink(url=str(torrent), kind="torrent_file"),
+        dest=dest,
+        progress=lambda percent, detail: None,
+    )
+
+    assert result.path.name == "payload.bin"
+    args, label = calls[0]
+    assert label == "torrent"
+    assert f"--torrent-file={torrent}" in args
+    assert str(torrent) not in args
+
+
 def test_collect_picks_largest_file(tmp_path):
     dest = tmp_path / "files"
     dest.mkdir()

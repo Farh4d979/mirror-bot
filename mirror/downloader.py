@@ -145,6 +145,13 @@ class Downloader:
             return self._torrent(link.url, dest, progress)
         if link.kind == "torrent":
             return self._torrent(link.url, dest, progress, referer=link.referer)
+        if link.kind == "torrent_file":
+            return self._torrent(
+                link.url,
+                dest,
+                progress,
+                torrent_file=Path(link.url),
+            )
         if link.kind == "ytdlp":
             try:
                 return self._ytdlp(original_url, dest, progress)
@@ -325,6 +332,7 @@ class Downloader:
         progress: ProgressCB,
         *,
         referer: Optional[str] = None,
+        torrent_file: Optional[Path] = None,
     ) -> DownloadResult:
         if not shutil.which(self.settings.aria2c_path):
             raise DownloadError(
@@ -352,9 +360,14 @@ class Downloader:
             "--timeout=60",
             "--user-agent=" + USER_AGENT,
         ]
-        if referer:
-            args.append(f"--referer={referer}")
-        args.append(url)
+        if torrent_file is not None:
+            # A local path is not a URI. aria2's positional argument parser
+            # rejects it on Linux even though the file is a valid .torrent.
+            args.append(f"--torrent-file={torrent_file}")
+        else:
+            if referer:
+                args.append(f"--referer={referer}")
+            args.append(url)
         self._run_aria2(args, dest, progress, label="torrent")
         result = self._collect(dest)
         if exceeds_limit(result.size, self.max_size):

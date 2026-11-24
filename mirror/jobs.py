@@ -200,7 +200,7 @@ class JobManager:
                     link = ResolvedLink(
                         url=str(job.local_path.resolve()),
                         filename=job.local_path.name,
-                        kind="torrent",
+                        kind="torrent_file",
                     )
                 else:
                     job.update(stage="resolving", detail="Looking for the direct link…")
