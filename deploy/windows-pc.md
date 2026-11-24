@@ -145,7 +145,9 @@ process before it starts the fallback.
   starting Actions.
 - **PC starts again**: it cancels the fallback run and takes over. If a run
   cannot be cancelled within 3 minutes, the PC refuses to start so both
-  processes do not poll at once.
+  processes do not poll at once. **This interrupts a job the fallback is
+  processing.** Send `/status` in Telegram before starting the PC and wait for
+  any active fallback job to finish.
 
 The fallback run lasts at most **4 hours 45 minutes** and then exits. If the PC
 will be off longer, start another run manually from the Actions tab.

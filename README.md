@@ -57,10 +57,12 @@ scripts\run-local.cmd
 ```
 
 The PC runner cancels any active Actions run before polling, so the two never
-fight over Telegram updates. On exit (Ctrl+C or `/handoff`) it starts one
-Actions run. If the PC loses power or is turned off without a handoff, the bot
-is offline until the PC comes back; Telegram keeps updates for 24 hours. That is
-the tradeoff for not depending on GitHub as an always-on server.
+fight over Telegram updates. Starting the PC interrupts a job that the fallback
+is processing; check `/status` and let it finish first. On exit (Ctrl+C or
+`/handoff`) the PC starts one Actions run. If the PC loses power or is turned
+off without a handoff, the bot is offline until the PC comes back; Telegram
+keeps updates for 24 hours. That is the tradeoff for not depending on GitHub as
+an always-on server.
 
 If you have an always-on Linux box, the included Docker image is a good
 alternative. [deploy/oracle-cloud.md](deploy/oracle-cloud.md) describes Oracle
