@@ -1107,6 +1107,12 @@ def main() -> None:
     repo: Optional[str] = None
     ref: Optional[str] = None
     if settings.local_mode:
+        if "replace-me" in settings.telegram_token:
+            logger.error(
+                "TELEGRAM_BOT_TOKEN is still the placeholder from .env.example. "
+                "Edit .env before starting the PC runner."
+            )
+            raise SystemExit(1)
         try:
             repo = resolve_repo(settings.actions_repo)
             ref = settings.actions_ref or current_branch()

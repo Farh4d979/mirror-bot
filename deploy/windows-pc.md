@@ -120,8 +120,9 @@ Wait for:
 Bot polling started (run_seconds=unlimited, ...)
 ```
 
-Send `/start` to the bot in Telegram. Keep the window open; closing it stops
-the bot and (by default) starts the Actions fallback.
+Send `/start` to the bot in Telegram. Keep the window open and stop the bot
+with **Ctrl+C** or **`/handoff`**; closing the console window can kill the
+process before it starts the fallback.
 
 ### Handoff and takeover
 
