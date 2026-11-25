@@ -1625,19 +1625,23 @@ async def _handle_inline_start(
         return
 
     entry: Optional[dict] = None
+    mismatch = False
     async with _inline_lock(context):
         pending = _read_inline_pending(settings)
         candidate = pending.get(token)
         if candidate is not None and candidate.get("user_id") != user.id:
-            await query.answer(
-                "Only the person who created this mirror can start it.",
-                show_alert=True,
-            )
-            return
-        if candidate is not None:
+            mismatch = True
+        elif candidate is not None:
             entry = candidate
             pending.pop(token, None)
             _write_inline_pending(settings, pending)
+
+    if mismatch:
+        await query.answer(
+            "Only the person who created this mirror can start it.",
+            show_alert=True,
+        )
+        return
 
     existing = _job_for_inline_message(context, inline_message_id)
     if existing is not None:
