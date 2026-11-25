@@ -93,7 +93,9 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq aria2 ffmpeg megatools xz-utils
+          sudo apt-get install -y -qq aria2 ffmpeg megatools xz-utils 7zip 7zip-rar \
+            || sudo apt-get install -y -qq aria2 ffmpeg megatools xz-utils p7zip-full p7zip-rar
+          command -v 7z || command -v 7zz
 
       - name: Install payload-dumper-go
         run: |

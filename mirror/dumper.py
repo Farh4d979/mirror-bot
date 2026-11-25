@@ -11,6 +11,10 @@ Two extraction paths are supported:
 * ``super.img``: Android's logical-partition metadata is parsed here, so a
   sparse super image can be read without ``simg2img`` and only the requested
   extents are copied.  This is important on GitHub's ~14 GB runners.
+
+Archives may be ZIP/TAR or 7z/RAR.  ZIP and TAR are read with Python's
+standard library; 7z and RAR are streamed through the ``7z`` command-line
+tool so large ROMs are never unpacked in full.
 """
 
 from __future__ import annotations
@@ -53,6 +57,7 @@ _ARCHIVE_SUFFIXES = (
     ".tar.bz2",
     ".tbz2",
 )
+_SEVEN_ZIP_SUFFIXES = (".7z", ".rar")
 
 _PAYLOAD_MAGIC = b"CrAU"
 _SPARSE_MAGIC = 0xED26FF3A
@@ -133,7 +138,9 @@ class ExtractionResult:
 class _ArchiveEntry:
     archive: Path
     name: str
-    kind: str  # "zip" | "tar"
+    kind: str  # "zip" | "tar" | "7z" | "rar"
+    size: int = 0
+    encrypted: bool = False
 
     @property
     def basename(self) -> str:
@@ -184,7 +191,10 @@ def extract_partitions(
     output_dir.mkdir(parents=True, exist_ok=True)
     files = _candidate_files(root)
     progress(None, "Scanning the download for Android images…")
-    archives = _scan_archives(files, progress=progress, cancel=cancel)
+    seven_zip = _find_7zip(settings)
+    archives = _scan_archives(
+        files, progress=progress, cancel=cancel, seven_zip=seven_zip
+    )
 
     available: list[str] = []
     sources: list[str] = []
@@ -209,6 +219,7 @@ def extract_partitions(
                     label=f"Extracting {actual}.img",
                     cancel=cancel,
                     progress=progress,
+                    seven_zip=seven_zip,
                 )
             if destination.exists() and destination.stat().st_size > 0:
                 _append_unique(outputs, destination)
@@ -242,6 +253,7 @@ def extract_partitions(
                             label="Extracting payload.bin",
                             cancel=cancel,
                             progress=progress,
+                            seven_zip=seven_zip,
                         )
                         local_path = temporary
 
@@ -311,6 +323,7 @@ def extract_partitions(
                             label="Extracting super.img",
                             cancel=cancel,
                             progress=progress,
+                            seven_zip=seven_zip,
                         )
                     except DumpError as exc:
                         logger.warning("Could not extract super.img: %s", exc)
@@ -442,13 +455,40 @@ def _archive_kind(path: Path) -> Optional[str]:
         return "zip"
     if lower.endswith(_ARCHIVE_SUFFIXES):
         return "tar"
+    if lower.endswith(_SEVEN_ZIP_SUFFIXES):
+        return "7z" if lower.endswith(".7z") else "rar"
     try:
         with path.open("rb") as handle:
-            magic = handle.read(4)
+            magic = handle.read(8)
     except OSError:
         return None
     if magic.startswith(b"PK"):
         return "zip"
+    if magic.startswith(b"7z\xbc\xaf\x27\x1c"):
+        return "7z"
+    if magic.startswith(b"Rar!\x1a\x07"):
+        return "rar"
+    return None
+
+
+def _find_7zip(settings: Settings) -> Optional[str]:
+    configured = (settings.seven_zip_path or "7z").strip()
+    candidates = [configured, "7z", "7zz", "7za"]
+    if os.name == "nt":
+        candidates.extend(["7z.exe", "7zz.exe"])
+        for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+            if base:
+                candidates.append(str(Path(base) / "7-Zip" / "7z.exe"))
+    candidates.append(str(Path("tools") / ("7z.exe" if os.name == "nt" else "7z")))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        found = shutil.which(candidate)
+        if found:
+            return found
+        path = Path(candidate)
+        if path.is_file():
+            return str(path)
     return None
 
 
@@ -457,16 +497,25 @@ def _scan_archives(
     *,
     progress: ProgressCB,
     cancel: CancelToken,
+    seven_zip: Optional[str] = None,
 ) -> dict[Path, list[_ArchiveEntry]]:
     archives: dict[Path, list[_ArchiveEntry]] = {}
     for path in files:
         kind = _archive_kind(path)
         if not kind:
             continue
+        if kind in {"7z", "rar"} and not seven_zip:
+            raise DumpError(
+                "This download is a .7z or .rar archive, but 7-Zip is not "
+                "installed. Install 7-Zip (the `7z` command), or set "
+                "SEVEN_ZIP_PATH to its executable, then retry."
+            )
         cancel.check()
         progress(None, f"Scanning {path.name}…")
         try:
-            entries = _list_archive(path, kind, cancel=cancel)
+            entries = _list_archive(
+                path, kind, cancel=cancel, seven_zip=seven_zip
+            )
         except (OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
             logger.warning("Could not read archive %s: %s", path, exc)
             continue
@@ -476,7 +525,11 @@ def _scan_archives(
 
 
 def _list_archive(
-    path: Path, kind: str, *, cancel: CancelToken
+    path: Path,
+    kind: str,
+    *,
+    cancel: CancelToken,
+    seven_zip: Optional[str] = None,
 ) -> list[_ArchiveEntry]:
     entries: list[_ArchiveEntry] = []
     if kind == "zip":
@@ -485,15 +538,116 @@ def _list_archive(
                 cancel.check()
                 if info.is_dir() or info.file_size <= 0:
                     continue
-                entries.append(_ArchiveEntry(path, info.filename, "zip"))
+                entries.append(
+                    _ArchiveEntry(path, info.filename, "zip", size=info.file_size)
+                )
         return entries
 
-    with tarfile.open(path, "r:*") as archive:
-        for member in archive.getmembers():
-            cancel.check()
-            if not member.isfile() or member.size <= 0:
-                continue
-            entries.append(_ArchiveEntry(path, member.name, "tar"))
+    if kind == "tar":
+        with tarfile.open(path, "r:*") as archive:
+            for member in archive.getmembers():
+                cancel.check()
+                if not member.isfile() or member.size <= 0:
+                    continue
+                entries.append(
+                    _ArchiveEntry(path, member.name, "tar", size=member.size)
+                )
+        return entries
+
+    if not seven_zip:
+        raise DumpError(
+            "7-Zip is required to read .7z and .rar archives. Install it and "
+            "retry, or set SEVEN_ZIP_PATH to the 7z executable."
+        )
+    return _list_7z(path, kind, seven_zip, cancel=cancel)
+
+
+def _list_7z(
+    path: Path,
+    kind: str,
+    binary: str,
+    *,
+    cancel: CancelToken,
+) -> list[_ArchiveEntry]:
+    command = [binary, "l", "-slt", "-sccUTF-8", "-bd", "--", str(path)]
+    try:
+        lines = _run_process(
+            command,
+            label="7-Zip",
+            cancel=cancel,
+            progress=lambda percent, detail: None,
+            interval=10.0,
+        )
+    except DumpError as exc:
+        lowered = str(exc).lower()
+        if "password" in lowered or "encrypt" in lowered:
+            raise DumpError(
+                f"{path.name} is encrypted. Password-protected 7z/RAR archives "
+                "are not supported; extract it first and upload the extracted "
+                "files."
+            ) from exc
+        raise
+    entries = _parse_7z_entries(path, kind, lines)
+    if not entries:
+        raise DumpError(
+            f"7-Zip could not list any files in {path.name}. The archive may "
+            "be empty, encrypted, or damaged."
+        )
+    return entries
+
+
+def _parse_7z_entries(
+    path: Path, kind: str, lines: Sequence[str]
+) -> list[_ArchiveEntry]:
+    entries: list[_ArchiveEntry] = []
+    started = False
+    current: dict[str, str] = {}
+
+    def flush() -> None:
+        name = current.get("Path", "")
+        if not name:
+            return
+        while name.startswith("./"):
+            name = name[2:]
+        attributes = current.get("Attributes", "")
+        folder = current.get("Folder", "") == "+"
+        try:
+            size = int(current.get("Size", "0").strip() or 0)
+        except ValueError:
+            size = 0
+        if folder or attributes.startswith("D") or size <= 0:
+            return
+        entries.append(
+            _ArchiveEntry(
+                path,
+                name.replace("\\", "/"),
+                kind,
+                size=size,
+                encrypted=current.get("Encrypted", "") == "+",
+            )
+        )
+
+    for raw in lines:
+        line = raw.rstrip()
+        if line.startswith("----------"):
+            started = True
+            current = {}
+            continue
+        if not started:
+            continue
+        if not line.strip():
+            flush()
+            current = {}
+            continue
+        key, separator, value = line.partition(" = ")
+        if not separator:
+            continue
+        if key == "Path":
+            flush()
+            current = {"Path": value}
+        elif current:
+            current[key] = value
+    flush()
     return entries
 
 
@@ -629,6 +783,7 @@ def _materialize(
     label: str,
     cancel: CancelToken,
     progress: ProgressCB,
+    seven_zip: Optional[str] = None,
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_suffix(destination.suffix + ".part")
@@ -648,6 +803,7 @@ def _materialize(
                 label=label,
                 cancel=cancel,
                 progress=progress,
+                seven_zip=seven_zip,
             )
         partial.replace(destination)
     except Exception:
@@ -684,7 +840,30 @@ def _extract_entry(
     label: str,
     cancel: CancelToken,
     progress: ProgressCB,
+    seven_zip: Optional[str] = None,
 ) -> None:
+    if entry.kind in {"7z", "rar"}:
+        if entry.encrypted:
+            raise DumpError(
+                f"{entry.archive.name} is encrypted. Password-protected 7z/RAR "
+                "archives are not supported; extract it first and upload the "
+                "extracted files."
+            )
+        if not seven_zip:
+            raise DumpError(
+                "7-Zip is required to read .7z and .rar archives. Install it "
+                "and retry, or set SEVEN_ZIP_PATH to the 7z executable."
+            )
+        _stream_7z_member(
+            seven_zip,
+            entry,
+            destination,
+            label=label,
+            cancel=cancel,
+            progress=progress,
+        )
+        return
+
     if entry.kind == "zip":
         with zipfile.ZipFile(entry.archive) as archive:
             info = archive.getinfo(entry.name)
@@ -719,6 +898,110 @@ def _extract_entry(
                 done += len(chunk)
                 percent = done / total * 100 if total else None
                 progress(percent, f"{label} · {format_progress(done, total)}")
+
+
+def _stream_7z_member(
+    binary: str,
+    entry: _ArchiveEntry,
+    destination: Path,
+    *,
+    label: str,
+    cancel: CancelToken,
+    progress: ProgressCB,
+) -> None:
+    """Stream one archive member to disk without unpacking the whole archive."""
+    command = [
+        binary,
+        "x",
+        "-so",
+        "-sccUTF-8",
+        "-bd",
+        "-y",
+        "-spd",
+        "--",
+        str(entry.archive),
+        entry.name,
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise DumpError(f"Could not start 7-Zip: {exc}") from exc
+
+    errors: list[str] = []
+    failure: list[MirrorError] = []
+    stop = threading.Event()
+
+    def read_errors() -> None:
+        assert process.stderr is not None
+        for raw in process.stderr:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            errors.append(line)
+            if len(errors) > 40:
+                del errors[:-40]
+
+    def watchdog() -> None:
+        while not stop.wait(2.0):
+            try:
+                cancel.check()
+            except MirrorError as exc:
+                failure.append(exc)
+                _terminate(process)
+                return
+
+    reader = threading.Thread(target=read_errors, daemon=True)
+    watcher = threading.Thread(target=watchdog, daemon=True)
+    reader.start()
+    watcher.start()
+    done = 0
+    try:
+        assert process.stdout is not None
+        with destination.open("wb") as output:
+            while True:
+                cancel.check()
+                chunk = process.stdout.read(_COPY_CHUNK)
+                if not chunk:
+                    break
+                output.write(chunk)
+                done += len(chunk)
+                percent = done / entry.size * 100 if entry.size else None
+                progress(percent, f"{label} · {format_progress(done, entry.size)}")
+        code = process.wait(timeout=60)
+    except (JobCancelled, JobTimeout):
+        _terminate(process)
+        raise
+    except subprocess.TimeoutExpired:
+        _terminate(process)
+        raise DumpError("7-Zip did not exit after finishing.")
+    finally:
+        stop.set()
+        watcher.join(timeout=5)
+        reader.join(timeout=5)
+        if process.poll() is None:
+            _terminate(process)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+
+    if failure:
+        raise failure[0]
+    if code != 0:
+        details = " | ".join(errors[-4:]) or "no details from 7-Zip"
+        lowered = details.lower()
+        if "password" in lowered or "encrypt" in lowered:
+            raise DumpError(
+                f"{entry.archive.name} is encrypted. Password-protected 7z/RAR "
+                "archives are not supported; extract it first and upload the "
+                "extracted files."
+            )
+        raise DumpError(f"7-Zip failed (exit code {code}): {details[:600]}")
 
 
 # -------------------------------------------------------------------- payloads
@@ -1304,7 +1587,9 @@ def _missing_message(
         lines.append(
             "I could not find a payload.bin, super.img, or matching .img file "
             "in this download. Dump mode supports Android OTA zips with "
-            "payload.bin, fastboot ROMs with super.img, and raw partition images."
+            "payload.bin, fastboot ROMs with super.img, raw partition images, "
+            "and .7z/.rar archives containing any of these. Password-protected "
+            "archives are not supported."
         )
     if payload_error:
         lines.append(f"Payload error: {payload_error[:300]}")

@@ -28,7 +28,7 @@ Telegram link / replied file
 - Video sites through yt-dlp (YouTube, Vimeo, TikTok, X/Twitter, Reddit, etc.).
 - Image galleries through gallery-dl (Pixiv, Danbooru, Gelbooru, Imgur albums, DeviantArt, Flickr, ArtStation, Tumblr, Reddit image posts, and many more).
 - Public MEGA file and folder links through megatools (`megadl`).
-- Android partition dumps: `/gf <link> -dump boot,vendor` downloads an OTA zip or fastboot ROM, extracts only the requested images from `payload.bin` or `super.img`, and uploads each image separately.
+- Android partition dumps: `/gf <link> -dump boot,vendor` downloads an OTA zip, fastboot ROM, or `.7z`/`.rar` archive, extracts only the requested images from `payload.bin` or `super.img`, and uploads each image separately.
 - Magnet links and `.torrent` files through aria2c (DHT enabled, seeding disabled).
 - Telegram attachments — documents, photos, video, audio, voice notes, animations and stickers — are mirrored only when you reply to them with `/gf` or `/px`. Unsolicited media is ignored. Telegram's cloud Bot API limits bot downloads to 20 MB per attachment.
 - Gofile share links (`gofile.io/d/...`) resolve through Gofile's API using a temporary guest token. Folder links are supported; the bot downloads the largest file or every file in `MULTI_FILE_MODE=zip`.
@@ -305,9 +305,9 @@ Actions busy indefinitely.
 
 ## Local setup
 
-Requirements: Python 3.10+ (3.12 recommended), [aria2](https://aria2.github.io/) and ffmpeg. Without aria2, direct HTTP downloads still work through Python, but torrents/magnets do not. MEGA links additionally need megatools (`megadl`, or the newer Windows `megatools.exe`). `-dump` extraction needs [payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases); gallery-dl and yt-dlp are installed from `requirements.txt`.
+Requirements: Python 3.10+ (3.12 recommended), [aria2](https://aria2.github.io/) and ffmpeg. Without aria2, direct HTTP downloads still work through Python, but torrents/magnets do not. MEGA links additionally need megatools (`megadl`, or the newer Windows `megatools.exe`). `-dump` extraction needs [payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases) and [7-Zip](https://www.7-zip.org/) for `.7z`/`.rar` ROMs; gallery-dl and yt-dlp are installed from `requirements.txt`.
 
-On Windows, the setup script installs aria2, ffmpeg, megatools,
+On Windows, the setup script installs aria2, ffmpeg, 7-Zip, megatools,
 payload-dumper-go, creates `.venv`, and installs the Python dependencies:
 
 ```powershell
@@ -389,7 +389,7 @@ docker run -d --name mirror-bot \
   mirror-bot
 ```
 
-The image includes aria2, ffmpeg, megatools, payload-dumper-go and gallery-dl. Downloads and state live in `/data`.
+The image includes aria2, ffmpeg, megatools, payload-dumper-go, 7-Zip and gallery-dl. Downloads and state live in `/data`. Debian's `7zip` package reads `.7z` archives but not RAR; install the non-free `7zip-rar` plugin in the image if you need RAR there.
 
 ## Configuration
 
@@ -418,6 +418,7 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go and gallery-dl. D
 | `STATE_FILE` | `.state/telegram.json` | Telegram offset state. The PC runner uses `.state/local-telegram.json`. |
 | `ARIA2C_PATH` | `aria2c` | Path to the aria2c binary |
 | `PAYLOAD_DUMPER_PATH` | `payload-dumper-go` | Path to payload-dumper-go, used by `-dump` |
+| `SEVEN_ZIP_PATH` | `7z` | Path to the 7-Zip executable, used by `-dump` for `.7z`/`.rar` archives |
 | `ALLOW_PRIVATE_URLS` | `0` | **Dangerous.** Allows localhost/private IP links. Keep off in production. |
 | `LOG_LEVEL` | `INFO` | Python log level |
 
@@ -427,7 +428,7 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go and gallery-dl. D
 |---|---|
 | `/start`, `/help` | Usage |
 | `/gf <link>` | Upload a link to Gofile, or reply to a file with `/gf` |
-| `/gf <link> -dump boot,vendor` | Extract only those Android partitions from `payload.bin` or `super.img`, then upload each one |
+| `/gf <link> -dump boot,vendor` | Extract only those Android partitions from `payload.bin` or `super.img` (ZIP, TAR, 7z or RAR), then upload each one |
 | `/mirror <link>` | Same as `/gf` |
 | `/px <link>` | Upload a link to Pixeldrain, or reply to a file with `/px` (requires `PIXELDRAIN_API_KEY`) |
 | `/status` | Active jobs |
@@ -455,15 +456,15 @@ Supported sources inside the download:
 |---|---|
 | OTA `.zip` containing `payload.bin` (full OTA, or a partial payload that needs no source images) | `payload-dumper-go` extracts only the selected partitions |
 | Raw `payload.bin` | Same as above |
-| Fastboot ROM `.zip` / `.tar` / `.tar.gz` / `.tgz` containing `super.img` | The LP metadata is parsed and only the requested extents are copied (sparse `super.img` works too) |
+| Fastboot ROM `.zip` / `.tar` / `.tar.gz` / `.tgz` / `.7z` / `.rar` containing `super.img` | The LP metadata is parsed and only the requested extents are copied (sparse `super.img` works too) |
 | Raw or already-extracted `boot.img`, `vendor.img`, … | Used directly |
-| ZIP/TAR containing raw partition images | Only the matching `.img` members are extracted |
+| ZIP/TAR/7z/RAR containing raw partition images | Only the matching `.img` members are extracted; 7z/RAR members are streamed straight to disk |
 
-If a logical partition exists in both slots, `-dump vendor` picks `vendor_a` (slot A); ask for `vendor_a,vendor_b` to get both. File names in the result are the actual partition names, so `vendor` may produce `vendor_a.img`. Partitions that were requested but do not exist are listed in the final message; if none exist, the job fails with the available partition names. Incremental (delta) OTAs need the previous firmware and are not supported. `7z`/`RAR`, `.lz4` members and Samsung `.tar.md5` firmware are not supported — extract those first.
+If a logical partition exists in both slots, `-dump vendor` picks `vendor_a` (slot A); ask for `vendor_a,vendor_b` to get both. File names in the result are the actual partition names, so `vendor` may produce `vendor_a.img`. Partitions that were requested but do not exist are listed in the final message; if none exist, the job fails with the available partition names. Incremental (delta) OTAs need the previous firmware and are not supported. Password-protected 7z/RAR archives, `.lz4` members and Samsung `.tar.md5` firmware are not supported — extract those first.
 
 `-dump` works with both `/gf` and `/px`, and with a file you reply to.
 
-Extraction needs free disk space for the requested images, not for the whole `super.img`, but the downloaded ROM is kept until the job finishes. payload-dumper-go is installed by the GitHub Actions workflow, the Docker image, and `scripts\setup-windows.ps1`. For a manual local run, download it from [ssut/payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases), put it on `PATH` (or set `PAYLOAD_DUMPER_PATH`), and install `xz` if your payloads need it.
+Extraction needs free disk space for the requested images, not for the whole `super.img`, but the downloaded ROM is kept until the job finishes. payload-dumper-go and 7-Zip are installed by the GitHub Actions workflow, the Docker image (7-Zip only), and `scripts\setup-windows.ps1`. For a manual local run, install [7-Zip](https://www.7-zip.org/) so `7z`/`7zz` is on `PATH` (or set `SEVEN_ZIP_PATH`), download payload-dumper-go from [ssut/payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases) and put it on `PATH` (or set `PAYLOAD_DUMPER_PATH`), and install `xz` if your payloads need it.
 
 ## Supported links
 

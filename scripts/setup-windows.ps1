@@ -3,7 +3,7 @@
 # Run from PowerShell:
 #   powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
 #
-# This installs aria2 and ffmpeg with winget, downloads megatools and
+# This installs aria2, ffmpeg and 7-Zip with winget, downloads megatools and
 # payload-dumper-go into tools\, creates .venv, and installs requirements.txt.
 # It does not start the bot or change .env.
 
@@ -43,8 +43,38 @@ function Ensure-WingetPackage {
 
 Refresh-Path
 
+function Get-SevenZipPath {
+    $candidates = @((Join-Path $env:ProgramFiles "7-Zip\7z.exe"))
+    if (${env:ProgramFiles(x86)}) {
+        $candidates += (Join-Path ${env:ProgramFiles(x86)} "7-Zip\7z.exe")
+    }
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    $command = Get-Command 7z -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    return $null
+}
+
+function Ensure-SevenZip {
+    if (Get-SevenZipPath) {
+        Write-Host "7-Zip is already installed."
+        return
+    }
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "winget is required to install 7-Zip. Install App Installer from the Microsoft Store."
+    }
+    Write-Host "Installing 7zip.7zip..."
+    winget install --id 7zip.7zip -e --accept-source-agreements --accept-package-agreements --silent
+    Refresh-Path
+    if (-not (Get-SevenZipPath)) {
+        throw "7-Zip was installed but 7z.exe was not found."
+    }
+}
+
 Ensure-WingetPackage -Id "aria2.aria2" -Command "aria2c"
 Ensure-WingetPackage -Id "Gyan.FFmpeg.Essentials" -Command "ffmpeg"
+Ensure-SevenZip
 
 function Download-File {
     param(
@@ -133,6 +163,7 @@ if ($missing.Count -gt 0) {
 }
 if (-not (Test-Path (Join-Path $Tools "megatools.exe"))) { $missing += "megatools.exe" }
 if (-not (Test-Path (Join-Path $Tools "payload-dumper-go.exe"))) { $missing += "payload-dumper-go.exe" }
+if (-not (Get-SevenZipPath)) { $missing += "7z.exe" }
 
 Write-Host ""
 Write-Host "Setup complete." -ForegroundColor Green

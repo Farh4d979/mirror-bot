@@ -64,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1
 
 The script:
 
-- installs **aria2** and **ffmpeg** with winget;
+- installs **aria2**, **ffmpeg** and **7-Zip** with winget;
 - installs **megatools** and **payload-dumper-go** into `tools\`;
 - creates `.venv` and installs `requirements.txt`;
 - creates `.env` from `.env.example` if it does not exist.
@@ -275,8 +275,10 @@ tools and are not affected.
 builds use one executable with a `dl` subcommand; the bot detects this. Check
 `tools\megatools.exe --help`.
 
-**`-dump` fails** — check that `tools\payload-dumper-go.exe` exists. The bot
-adds `tools\` to PATH when started through `run-local.cmd`.
+**`-dump` fails** — check that `tools\payload-dumper-go.exe` exists. For `.7z`
+or `.rar` ROMs, check that 7-Zip is installed at
+`C:\Program Files\7-Zip\7z.exe` (or set `SEVEN_ZIP_PATH`). The bot adds
+`tools\` to PATH when started through `run-local.cmd`.
 
 **Bot stops when the PC sleeps** — use `/handoff` first, disable sleep while
 plugged in, or accept the downtime. There is no automatic wake-up.

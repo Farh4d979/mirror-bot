@@ -1041,9 +1041,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             else ""
         )
         + "\n<b>Android partition dump</b>\n"
-        "/gf &lt;link&gt; -dump boot,vendor — download an OTA zip / fastboot ROM, "
-        "extract only those partition images from payload.bin or super.img, and "
-        "upload them. Use <code>-dump</code> with spaces too: "
+        "/gf &lt;link&gt; -dump boot,vendor — download an OTA zip, fastboot ROM, "
+        "or 7z/RAR archive, extract only those partition images from payload.bin "
+        "or super.img, and upload them. Use <code>-dump</code> with spaces too: "
         "<code>-dump boot vendor</code>.",
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import io
+import shutil
 import struct
+import subprocess
 import sys
 import tarfile
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +19,37 @@ from mirror.utils import CancelToken
 GEOMETRY_MAGIC = 0x616C4467
 HEADER_MAGIC = 0x414C5030
 SPARSE_MAGIC = 0xED26FF3A
+
+SEVEN_ZIP = dumper._find_7zip(Settings(telegram_token="test")) or ""
+requires_7zip = pytest.mark.skipif(
+    not SEVEN_ZIP, reason="7-Zip is not installed"
+)
+
+
+def create_7z(
+    root: Path,
+    archive_name: str,
+    members: dict[str, bytes],
+    *,
+    extra_args: tuple[str, ...] = (),
+) -> Path:
+    """Build a 7z archive from relative member paths and remove the inputs."""
+    root.mkdir(parents=True, exist_ok=True)
+    for name, data in members.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    archive = root / archive_name
+    subprocess.run(
+        [SEVEN_ZIP, "a", "-t7z", *extra_args, str(archive), *members],
+        cwd=root,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for name in members:
+        (root / name).unlink(missing_ok=True)
+    return archive
 
 
 def make_settings(tmp_path, **overrides) -> Settings:
@@ -509,3 +543,162 @@ def test_missing_vendor_is_not_replaced_by_vendor_boot(tmp_path):
 
     assert "vendor_boot" in str(excinfo.value)
     assert not (tmp_path / "out" / "vendor_boot.img").exists()
+
+
+@requires_7zip
+def test_direct_image_inside_7z_is_extracted(tmp_path):
+    root = tmp_path / "files"
+    create_7z(root, "images.7z", {"images/vendor.img": b"V" * 4096})
+
+    result = dumper.extract_partitions(
+        root,
+        ["vendor"],
+        tmp_path / "out",
+        settings=make_settings(tmp_path),
+        progress=lambda percent, detail: None,
+        cancel=CancelToken(),
+    )
+
+    assert result.files[0].name == "vendor.img"
+    assert result.files[0].read_bytes() == b"V" * 4096
+    assert result.found == ["vendor"]
+    assert result.missing == []
+
+
+@requires_7zip
+def test_super_image_inside_7z_is_extracted(tmp_path):
+    data = b"B" * 4096
+    raw = build_super_image([{"name": "vendor", "sectors": 8, "data": data}])
+    root = tmp_path / "files"
+    create_7z(root, "super.7z", {"super.img": raw})
+
+    result = dumper.extract_partitions(
+        root,
+        ["vendor"],
+        tmp_path / "out",
+        settings=make_settings(tmp_path),
+        progress=lambda percent, detail: None,
+        cancel=CancelToken(),
+    )
+
+    assert result.files[0].name == "vendor.img"
+    assert result.files[0].read_bytes()[: len(data)] == data
+    assert result.found == ["vendor"]
+
+
+@requires_7zip
+def test_payload_inside_7z_is_materialized_and_cleaned(tmp_path, monkeypatch):
+    root = tmp_path / "files"
+    payload = b"CrAU" + b"\0" * 100
+    create_7z(root, "ota.7z", {"ota/payload.bin": payload})
+
+    monkeypatch.setattr(
+        dumper, "_find_payload_dumper", lambda settings: "payload-dumper-go"
+    )
+    seen = {}
+
+    def fake_list(binary, input_path, *, cancel, progress):
+        seen["path"] = input_path
+        seen["bytes"] = input_path.read_bytes()
+        return {"boot": 4096}
+
+    def fake_extract(
+        binary, input_path, partitions, sizes, output_dir, *, cancel, progress
+    ):
+        (output_dir / "boot.img").write_bytes(b"B" * 4096)
+
+    monkeypatch.setattr(dumper, "_payload_partitions", fake_list)
+    monkeypatch.setattr(dumper, "_extract_payload", fake_extract)
+
+    result = dumper.extract_partitions(
+        root,
+        ["boot"],
+        tmp_path / "out",
+        settings=make_settings(tmp_path),
+        progress=lambda percent, detail: None,
+        cancel=CancelToken(),
+    )
+
+    assert seen["path"].name == "_payload_0.bin"
+    assert seen["bytes"] == payload
+    assert not seen["path"].exists()
+    assert result.files[0].read_bytes() == b"B" * 4096
+    assert result.missing == []
+
+
+@requires_7zip
+def test_rar_archive_extracts_direct_image(tmp_path):
+    root = tmp_path / "files"
+    root.mkdir()
+    shutil.copy(
+        Path(__file__).parent / "fixtures" / "sample.rar",
+        root / "rom.rar",
+    )
+
+    result = dumper.extract_partitions(
+        root,
+        ["vendor"],
+        tmp_path / "out",
+        settings=make_settings(tmp_path),
+        progress=lambda percent, detail: None,
+        cancel=CancelToken(),
+    )
+
+    assert result.files[0].name == "vendor.img"
+    assert result.files[0].read_bytes() == b"V" * 4096
+    assert result.found == ["vendor"]
+    assert result.missing == []
+
+
+@requires_7zip
+def test_encrypted_7z_reports_a_clear_error(tmp_path):
+    root = tmp_path / "files"
+    create_7z(
+        root,
+        "secret.7z",
+        {"vendor.img": b"V" * 4096},
+        extra_args=("-psecret", "-mhe=on"),
+    )
+
+    with pytest.raises(DumpError) as excinfo:
+        dumper.extract_partitions(
+            root,
+            ["vendor"],
+            tmp_path / "out",
+            settings=make_settings(tmp_path),
+            progress=lambda percent, detail: None,
+            cancel=CancelToken(),
+        )
+
+    message = str(excinfo.value).lower()
+    assert "encrypted" in message or "password" in message
+
+
+def test_missing_7zip_is_reported(tmp_path, monkeypatch):
+    root = tmp_path / "files"
+    root.mkdir()
+    (root / "rom.7z").write_bytes(b"7z\xbc\xaf\x27\x1c" + b"\0" * 100)
+
+    monkeypatch.setattr(dumper, "_find_7zip", lambda settings: None)
+
+    with pytest.raises(DumpError) as excinfo:
+        dumper.extract_partitions(
+            root,
+            ["vendor"],
+            tmp_path / "out",
+            settings=make_settings(tmp_path),
+            progress=lambda percent, detail: None,
+            cancel=CancelToken(),
+        )
+
+    assert "7-Zip" in str(excinfo.value)
+
+
+def test_archive_kind_detects_7z_and_rar_magic(tmp_path):
+    seven = tmp_path / "mystery.bin"
+    seven.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"\0" * 32)
+    assert dumper._archive_kind(seven) == "7z"
+
+    rar = tmp_path / "mystery2.bin"
+    rar.write_bytes(b"Rar!\x1a\x07\x01\x00" + b"\0" * 32)
+    assert dumper._archive_kind(rar) == "rar"

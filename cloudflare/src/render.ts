@@ -136,9 +136,9 @@ export function renderStart(botUsername = ""): string {
     + "/cancel — cancel your jobs\n"
     + "/id — show your Telegram ID\n\n"
     + "<b>Android partition dump</b>\n"
-    + "/gf &lt;link&gt; -dump boot,vendor — download an OTA zip / fastboot ROM, "
-    + "extract only those partition images from payload.bin or super.img, and "
-    + "upload them. Use <code>-dump</code> with spaces too: "
+    + "/gf &lt;link&gt; -dump boot,vendor — download an OTA zip, fastboot ROM, "
+    + "or 7z/RAR archive, extract only those partition images from payload.bin "
+    + "or super.img, and upload them. Use <code>-dump</code> with spaces too: "
     + "<code>-dump boot vendor</code>."
   );
 }

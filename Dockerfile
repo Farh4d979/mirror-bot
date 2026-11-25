@@ -5,7 +5,7 @@ ARG PAYLOAD_DUMPER_VERSION=2.1.0
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        aria2 ffmpeg megatools xz-utils ca-certificates curl; \
+        aria2 ffmpeg megatools xz-utils ca-certificates curl 7zip; \
     case "$(dpkg --print-architecture)" in \
         amd64) payload_arch=amd64 ;; \
         arm64) payload_arch=arm64 ;; \

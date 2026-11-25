@@ -67,6 +67,7 @@ class Settings:
     ytdlp_format: str = "bv*+ba/b"
     aria2c_path: str = "aria2c"
     payload_dumper_path: str = "payload-dumper-go"
+    seven_zip_path: str = "7z"
     allow_private_urls: bool = False
     log_level: str = "INFO"
 
@@ -116,6 +117,7 @@ def load_settings() -> Settings:
         aria2c_path=os.getenv("ARIA2C_PATH", "aria2c").strip() or "aria2c",
         payload_dumper_path=os.getenv("PAYLOAD_DUMPER_PATH", "payload-dumper-go").strip()
         or "payload-dumper-go",
+        seven_zip_path=os.getenv("SEVEN_ZIP_PATH", "7z").strip() or "7z",
         allow_private_urls=_env_bool("ALLOW_PRIVATE_URLS", False),
         log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
     )
