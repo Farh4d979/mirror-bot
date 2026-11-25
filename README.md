@@ -516,6 +516,8 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 
 **`409 Conflict`** — another process is polling the same bot token. Run `gh run list --workflow bot.yml` and cancel any active run before starting the PC bot, or stop the PC bot before starting an Actions run. The PC runner normally does this automatically.
 
+**`certificate is not yet valid` or the Worker health check fails** — the Windows clock is behind real time. Newly issued `workers.dev` certificates are rejected until the clock catches up, even though the Worker is healthy. Open **Settings → Time & language → Date & time → Sync now**, or run `Start-Service w32time; w32tm /resync` in an elevated prompt, then retry.
+
 **The handoff did not start** — check `gh auth status` and that the repository is correct (`ACTIONS_REPO`). The PC logs the `gh` error. You can also start the workflow manually from the Actions tab.
 
 **The state push fails** — the repository's default branch is probably protected. Allow GitHub Actions to push, or replace the state step with `actions/cache` restore/save.
