@@ -4,16 +4,19 @@ import type {
   GroupCache,
   JobRecord,
   NewJob,
+  PendingInline,
 } from "./types";
 
 interface StoreState {
   jobs: JobRecord[];
   seen: number[];
   groups: Record<string, GroupCache>;
+  pending: Record<string, PendingInline>;
 }
 
-const EMPTY_STATE: StoreState = { jobs: [], seen: [], groups: {} };
+const EMPTY_STATE: StoreState = { jobs: [], seen: [], groups: {}, pending: {} };
 const MAX_SEEN = 1000;
+const PENDING_TTL = 24 * 60 * 60;
 
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
@@ -24,6 +27,8 @@ function snapshot(state: StoreState): StoreState {
     jobs: Array.isArray(state.jobs) ? state.jobs : [],
     seen: Array.isArray(state.seen) ? state.seen : [],
     groups: state.groups && typeof state.groups === "object" ? state.groups : {},
+    pending:
+      state.pending && typeof state.pending === "object" ? state.pending : {},
   };
 }
 
@@ -42,6 +47,11 @@ export interface StoreLike {
   listForUser(userId: number): Promise<JobRecord[]>;
   getGroup(chatId: number): Promise<GroupCache | null>;
   setGroup(chatId: number, allowed: boolean, checkedAt: number): Promise<void>;
+  putPending(token: string, pending: PendingInline): Promise<void>;
+  takePending(
+    token: string,
+    userId: number,
+  ): Promise<{ pending: PendingInline | null; matched: boolean }>;
 }
 
 export class JobStore {
@@ -60,7 +70,9 @@ export class JobStore {
 
   private async load(): Promise<StoreState> {
     const stored = await this.ctx.storage.get<StoreState>("state");
-    return stored ? snapshot(stored) : { jobs: [], seen: [], groups: {} };
+    return stored
+      ? snapshot(stored)
+      : { jobs: [], seen: [], groups: {}, pending: {} };
   }
 
   private async save(state: StoreState): Promise<void> {
@@ -117,6 +129,12 @@ export class JobStore {
           (job) => job.dispatchKey === Number(incoming.dispatchKey),
         );
         if (existing) return { job: existing, created: false };
+        if (incoming.inlineMessageId) {
+          const existingInline = state.jobs.find(
+            (job) => job.inlineMessageId === incoming.inlineMessageId,
+          );
+          if (existingInline) return { job: existingInline, created: false };
+        }
         if (find(incoming.id)) throw new Error("Duplicate job id.");
 
         const createdAt = nowSeconds();
@@ -223,6 +241,33 @@ export class JobStore {
         return {};
       }
 
+      case "putPending": {
+        const token = String(body.token || "");
+        const pending = body.pending as PendingInline | undefined;
+        if (!token || !pending || !pending.userId || !pending.source) {
+          throw new Error("Invalid pending inline job.");
+        }
+        state.pending[token] = pending;
+        const cutoff = nowSeconds() - PENDING_TTL;
+        for (const [key, value] of Object.entries(state.pending)) {
+          if (!value || value.createdAt < cutoff) delete state.pending[key];
+        }
+        await this.save(state);
+        return {};
+      }
+
+      case "takePending": {
+        const token = String(body.token || "");
+        const pending = state.pending[token];
+        if (!pending) return { pending: null, matched: false };
+        const matched = pending.userId === Number(body.userId);
+        if (matched) {
+          delete state.pending[token];
+          await this.save(state);
+        }
+        return { pending, matched };
+      }
+
       default:
         throw new Error(`Unknown store operation: ${op}`);
     }
@@ -317,5 +362,19 @@ export class JobStoreClient implements StoreLike {
 
   async setGroup(chatId: number, allowed: boolean, checkedAt: number): Promise<void> {
     await this.op("setGroup", { chatId, allowed, checkedAt });
+  }
+
+  async putPending(token: string, pending: PendingInline): Promise<void> {
+    await this.op("putPending", { token, pending });
+  }
+
+  async takePending(
+    token: string,
+    userId: number,
+  ): Promise<{ pending: PendingInline | null; matched: boolean }> {
+    return this.op<{ pending: PendingInline | null; matched: boolean }>(
+      "takePending",
+      { token, userId },
+    );
   }
 }

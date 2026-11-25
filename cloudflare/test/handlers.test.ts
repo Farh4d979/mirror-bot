@@ -14,6 +14,7 @@ import type {
   GroupCache,
   JobRecord,
   NewJob,
+  PendingInline,
   TgCallbackQuery,
   TgChosenInlineResult,
   TgFile,
@@ -49,6 +50,7 @@ class FakeStore implements StoreLike {
   readonly jobs = new Map<string, JobRecord>();
   readonly seenIds = new Set<number>();
   readonly groups = new Map<number, GroupCache>();
+  readonly pending = new Map<string, PendingInline>();
 
   async seen(updateId: number): Promise<boolean> {
     return this.seenIds.has(updateId);
@@ -61,6 +63,9 @@ class FakeStore implements StoreLike {
   async reserve(job: NewJob): Promise<{ job: JobRecord; created: boolean }> {
     for (const existing of this.jobs.values()) {
       if (existing.dispatchKey === job.dispatchKey) {
+        return { job: existing, created: false };
+      }
+      if (job.inlineMessageId && existing.inlineMessageId === job.inlineMessageId) {
         return { job: existing, created: false };
       }
     }
@@ -133,6 +138,21 @@ class FakeStore implements StoreLike {
 
   async setGroup(chatId: number, allowed: boolean, checkedAt: number): Promise<void> {
     this.groups.set(chatId, { allowed, checkedAt });
+  }
+
+  async putPending(token: string, pending: PendingInline): Promise<void> {
+    this.pending.set(token, pending);
+  }
+
+  async takePending(
+    token: string,
+    userId: number,
+  ): Promise<{ pending: PendingInline | null; matched: boolean }> {
+    const pending = this.pending.get(token) || null;
+    if (!pending) return { pending: null, matched: false };
+    if (pending.userId !== userId) return { pending, matched: false };
+    this.pending.delete(token);
+    return { pending, matched: true };
   }
 }
 
@@ -260,6 +280,7 @@ function makeDeps(overrides: Partial<Config> = {}): {
   const tg = new FakeTelegram();
   const gh = new FakeGitHub();
   let counter = 0;
+  let tokenCounter = 0;
   const deps: HandlerDeps = {
     config: config(overrides),
     store,
@@ -267,6 +288,7 @@ function makeDeps(overrides: Partial<Config> = {}): {
     gh,
     now: () => 1000,
     newId: () => `job${String((counter += 1)).padStart(5, "0")}`,
+    newToken: () => `tok${String((tokenCounter += 1)).padStart(5, "0")}`,
   };
   return { deps, store, tg, gh };
 }
@@ -573,8 +595,8 @@ function chosenInline(
 }
 
 describe("inline mode", () => {
-  it("answers an inline query without creating a job", async () => {
-    const { deps, tg, gh } = makeDeps();
+  it("answers an inline query with a start button and stores the request", async () => {
+    const { deps, store, tg, gh } = makeDeps();
     await handleUpdate(deps, {
       update_id: 5,
       inline_query: inlineQuery({
@@ -598,8 +620,14 @@ describe("inline mode", () => {
     expect(result.title).toBe("Mirror to Gofile");
     expect(result.input_message_content.message_text).toContain("boot, vendor");
     expect(result.reply_markup.inline_keyboard[0][0]).toMatchObject({
-      text: "⏳ Starting…",
-      callback_data: "inline:pending",
+      text: "▶️ Start mirroring",
+      callback_data: "inline:start:tok00001",
+    });
+    expect(store.pending.get("tok00001")).toMatchObject({
+      userId: 42,
+      source: "https://example.com/file.bin",
+      host: "gofile",
+      dumpPartitions: ["boot", "vendor"],
     });
   });
 
@@ -644,10 +672,73 @@ describe("inline mode", () => {
     expect(result.reply_markup).toBeUndefined();
   });
 
-  it("answers the placeholder button while a job is starting", async () => {
+  it("starts a job when the inline Start button is pressed", async () => {
+    const { deps, store, tg, gh } = makeDeps();
+    await handleUpdate(deps, { update_id: 20, inline_query: inlineQuery() });
+    await handleUpdate(deps, {
+      update_id: 21,
+      callback_query: {
+        id: "cb-start",
+        from: user,
+        inline_message_id: "inline-1",
+        data: "inline:start:tok00001",
+      },
+    });
+
+    expect(gh.dispatched).toHaveLength(1);
+    const payload = await payloadOf(gh);
+    expect(payload).toMatchObject({
+      chat_id: 0,
+      message_id: 0,
+      inline_message_id: "inline-1",
+      source: "https://example.com/file.bin",
+      host: "gofile",
+    });
+    expect(tg.answers.at(-1)?.text).toBe("Starting…");
+    expect(tg.inlineEdits.at(-1)?.inlineMessageId).toBe("inline-1");
+    expect(tg.inlineEdits.at(-1)?.text).toContain("GitHub Actions");
+    expect(store.pending.has("tok00001")).toBe(false);
+  });
+
+  it("only lets the launcher start the inline job", async () => {
+    const { deps, store, tg, gh } = makeDeps();
+    await handleUpdate(deps, { update_id: 22, inline_query: inlineQuery() });
+    await handleUpdate(deps, {
+      update_id: 23,
+      callback_query: {
+        id: "cb-other",
+        from: { id: 99, first_name: "Other" },
+        inline_message_id: "inline-1",
+        data: "inline:start:tok00001",
+      },
+    });
+
+    expect(gh.dispatched).toHaveLength(0);
+    expect(tg.answers.at(-1)?.text).toContain("Only the person");
+    expect(store.pending.has("tok00001")).toBe(true);
+  });
+
+  it("expires an unknown inline start token", async () => {
     const { deps, tg } = makeDeps();
     await handleUpdate(deps, {
-      update_id: 8,
+      update_id: 24,
+      callback_query: {
+        id: "cb-expired",
+        from: user,
+        inline_message_id: "inline-1",
+        data: "inline:start:missing",
+      },
+    });
+
+    expect(tg.answers.at(-1)?.text).toContain("expired");
+    expect(tg.inlineEdits.at(-1)?.text).toContain("expired");
+    expect(tg.inlineEdits.at(-1)?.keyboard).toMatchObject({ inline_keyboard: [] });
+  });
+
+  it("clears an outdated placeholder button", async () => {
+    const { deps, tg } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 25,
       callback_query: {
         id: "cb-pending",
         from: user,
@@ -656,7 +747,28 @@ describe("inline mode", () => {
       },
     });
 
-    expect(tg.answers.at(-1)?.text).toContain("still starting");
+    expect(tg.answers.at(-1)?.text).toContain("outdated");
+    expect(tg.inlineEdits.at(-1)?.text).toContain("expired");
+  });
+
+  it("does not start twice when the chosen result and button race", async () => {
+    const { deps, gh } = makeDeps();
+    await handleUpdate(deps, { update_id: 26, inline_query: inlineQuery() });
+    await handleUpdate(deps, {
+      update_id: 27,
+      chosen_inline_result: chosenInline(),
+    });
+    await handleUpdate(deps, {
+      update_id: 28,
+      callback_query: {
+        id: "cb-race",
+        from: user,
+        inline_message_id: "inline-1",
+        data: "inline:start:tok00001",
+      },
+    });
+
+    expect(gh.dispatched).toHaveLength(1);
   });
 
   it("ignores a chosen result without inline_message_id", async () => {

@@ -71,6 +71,10 @@ class FakeStore implements StoreLike {
     return null;
   }
   async setGroup(): Promise<void> {}
+  async putPending(): Promise<void> {}
+  async takePending(): Promise<{ pending: null; matched: boolean }> {
+    return { pending: null, matched: false };
+  }
 }
 
 class FakeTelegram implements TelegramLike {

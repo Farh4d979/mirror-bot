@@ -10,6 +10,7 @@ import {
   renderCancelled,
   renderDumpUsage,
   renderFailed,
+  renderInlineExpired,
   renderInlinePending,
   renderInlineUsage,
   renderJob,
@@ -23,6 +24,7 @@ import type { DeleteResult } from "./telegram";
 import type {
   JobRecord,
   NewJob,
+  PendingInline,
   TgCallbackQuery,
   TgChosenInlineResult,
   TgFile,
@@ -94,6 +96,7 @@ export interface HandlerDeps {
   gh: GitHubLike;
   now?: () => number;
   newId?: () => string;
+  newToken?: () => string;
 }
 
 function nowSeconds(deps: HandlerDeps): number {
@@ -102,6 +105,10 @@ function nowSeconds(deps: HandlerDeps): number {
 
 function randomJobId(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+}
+
+function randomToken(): string {
+  return crypto.randomUUID().replace(/-/g, "").slice(0, 12);
 }
 
 function isGroup(chatType: string): boolean {
@@ -215,7 +222,7 @@ async function editJobCard(
 
 export async function handleUpdate(deps: HandlerDeps, update: TgUpdate): Promise<void> {
   if (update.callback_query) {
-    await handleCallback(deps, update.callback_query);
+    await handleCallback(deps, update.callback_query, update.update_id);
     return;
   }
   if (update.message) {
@@ -478,6 +485,38 @@ async function handleInlineQuery(
   const description = parsed.dumpPartitions.length
     ? `${parsed.source} · dump ${parsed.dumpPartitions.join(", ")}`
     : parsed.source;
+  const token = deps.newToken ? deps.newToken() : randomToken();
+  try {
+    await deps.store.putPending(token, {
+      userId: from.id,
+      source: parsed.source,
+      host: parsed.host,
+      dumpPartitions: parsed.dumpPartitions,
+      createdAt: nowSeconds(deps),
+    });
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        level: "error",
+        msg: "Could not store pending inline job",
+        user_id: from.id,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    await deps.tg.answerInlineQuery(
+      query.id,
+      [
+        inlineResult(
+          "error",
+          "Could not prepare the job",
+          "Please try again",
+          "❌ <b>Could not prepare the mirror job.</b>\nPlease try the inline query again.",
+        ),
+      ],
+      { cacheTime: 0, isPersonal: true },
+    );
+    return;
+  }
   await deps.tg.answerInlineQuery(
     query.id,
     [
@@ -486,7 +525,7 @@ async function handleInlineQuery(
         title,
         description,
         renderInlinePending(parsed.host, parsed.dumpPartitions),
-        pendingKeyboard(),
+        pendingKeyboard(token),
       ),
     ],
     { cacheTime: 0, isPersonal: true },
@@ -500,6 +539,14 @@ async function handleChosenInlineResult(
 ): Promise<void> {
   const from = chosen.from;
   const inlineMessageId = String(chosen.inline_message_id || "");
+  console.log(
+    JSON.stringify({
+      level: "info",
+      msg: "Chosen inline result",
+      user_id: from?.id,
+      has_inline_message_id: Boolean(inlineMessageId),
+    }),
+  );
   if (!from || from.is_bot) return;
   if (!inlineMessageId) {
     console.log(
@@ -591,6 +638,15 @@ async function submitInlineJob(
         error: error instanceof Error ? error.message : String(error),
       }),
     );
+    try {
+      await deps.tg.editInlineMessageText(
+        inlineMessageId,
+        "❌ <b>Could not start the job.</b>\nPlease try the inline query again.",
+        emptyKeyboard(),
+      );
+    } catch {
+      // The inline message may be gone.
+    }
     return;
   }
   if (!reserved.created) {
@@ -602,6 +658,16 @@ async function submitInlineJob(
         dispatch_key: updateId,
       }),
     );
+    try {
+      await editJobCard(
+        deps,
+        reserved.job,
+        renderJob(reserved.job, now),
+        cancelKeyboard(reserved.job.id),
+      );
+    } catch {
+      // The other dispatch path is already updating the card.
+    }
     return;
   }
 
@@ -1051,12 +1117,19 @@ async function cancelAllForUser(
 async function handleCallback(
   deps: HandlerDeps,
   query: TgCallbackQuery,
+  updateId: number,
 ): Promise<void> {
   const from = query.from;
   const data = String(query.data || "");
   const message = query.message;
   if (!from || !data) {
     await deps.tg.answerCallbackQuery(query.id);
+    return;
+  }
+
+  const parts = data.split(":");
+  if (parts[0] === "inline" && parts[1] === "start") {
+    await handleInlineStart(deps, query, updateId, parts[2] || "");
     return;
   }
 
@@ -1075,12 +1148,23 @@ async function handleCallback(
     return;
   }
 
-  const parts = data.split(":");
   if (parts[0] === "inline" && parts[1] === "pending") {
     await deps.tg.answerCallbackQuery(
       query.id,
-      "The job is still starting. Try again in a few seconds.",
+      "This card is outdated. Run the inline query again.",
+      true,
     );
+    if (query.inline_message_id) {
+      try {
+        await deps.tg.editInlineMessageText(
+          query.inline_message_id,
+          renderInlineExpired(),
+          emptyKeyboard(),
+        );
+      } catch {
+        // The inline message may be gone.
+      }
+    }
     return;
   }
   if (parts[0] === "pick") {
@@ -1132,6 +1216,102 @@ async function handleCallback(
   }
 
   await deps.tg.answerCallbackQuery(query.id);
+}
+
+async function handleInlineStart(
+  deps: HandlerDeps,
+  query: TgCallbackQuery,
+  updateId: number,
+  token: string,
+): Promise<void> {
+  const from = query.from;
+  const inlineMessageId = String(query.inline_message_id || "");
+  if (!inlineMessageId) {
+    await deps.tg.answerCallbackQuery(
+      query.id,
+      "This card cannot be started. Run the inline query again.",
+      true,
+    );
+    return;
+  }
+  if (!token) {
+    await deps.tg.answerCallbackQuery(query.id, "This button is invalid.", true);
+    return;
+  }
+
+  let pending: PendingInline | null = null;
+  let matched = false;
+  try {
+    const result = await deps.store.takePending(token, from.id);
+    pending = result.pending;
+    matched = result.matched;
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        level: "error",
+        msg: "Could not read pending inline job",
+        user_id: from.id,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    await deps.tg.answerCallbackQuery(
+      query.id,
+      "Could not start the job. Please try again.",
+      true,
+    );
+    return;
+  }
+
+  if (!pending) {
+    await deps.tg.answerCallbackQuery(
+      query.id,
+      "This mirror request expired. Run the inline query again.",
+      true,
+    );
+    try {
+      await deps.tg.editInlineMessageText(
+        inlineMessageId,
+        renderInlineExpired(),
+        emptyKeyboard(),
+      );
+    } catch {
+      // The inline message may be gone.
+    }
+    return;
+  }
+
+  if (!matched) {
+    await deps.tg.answerCallbackQuery(
+      query.id,
+      "Only the person who created this mirror can start it.",
+      true,
+    );
+    return;
+  }
+
+  if (!privateAuthorized(deps, from.id)) {
+    await deps.tg.answerCallbackQuery(query.id, "Not authorized.", true);
+    return;
+  }
+
+  console.log(
+    JSON.stringify({
+      level: "info",
+      msg: "Inline start button",
+      user_id: from.id,
+      host: pending.host,
+      dump_partitions: pending.dumpPartitions.length,
+    }),
+  );
+  await deps.tg.answerCallbackQuery(query.id, "Starting…");
+  await submitInlineJob(deps, {
+    updateId,
+    from,
+    source: pending.source,
+    host: pending.host,
+    dumpPartitions: pending.dumpPartitions,
+    inlineMessageId,
+  });
 }
 
 /** Finalize a cancelled run after GitHub has stopped it. */

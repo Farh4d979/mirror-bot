@@ -267,7 +267,7 @@ Actions busy indefinitely.
 
 2. **Create the Telegram bot.** Talk to [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token.
 
-   For inline mode, also send `/setinline` to BotFather, pick the bot, and enter a placeholder such as `Mirror a link…`. Then send `/setinlinefeedback`, pick the bot, and choose **100%**. Without the feedback setting Telegram never tells the bot which inline message was posted, so the card cannot be updated. These two settings can only be changed in BotFather; the Bot API cannot enable them.
+   For inline mode, also send `/setinline` to BotFather, pick the bot, and enter a placeholder such as `Mirror a link…`. Then send `/setinlinefeedback`, pick the bot, and choose **100%**. With feedback enabled the job starts as soon as the inline result is picked. Without it Telegram never tells the bot which message was posted, so the card shows a **▶️ Start mirroring** button instead; tap it to start the job. These two settings can only be changed in BotFather; the Bot API cannot enable them.
 
 3. **Get your Telegram user ID.** Message [@userinfobot](https://t.me/userinfobot), or leave `ALLOWED_USER_IDS` empty for the first run, start the bot and send `/id`.
 
@@ -297,7 +297,7 @@ Actions busy indefinitely.
 - **Disk is limited.** The standard runner has about 14 GB of SSD. A single file must fit on the runner; the practical ceiling is roughly 12 GB. Set `MAX_FILE_SIZE` if you want a hard cap.
 - **State commits.** The fallback workflow pushes a tiny state commit (`chore: update bot state [skip ci]`) when the Telegram offset changes. If `main` is protected, allow GitHub Actions to push, or change the workflow to use a cache instead. The PC passes its current offset into the fallback run so already-handled updates are not replayed.
 - **Actions logs are public in a public repo.** The job payload is encrypted, but host errors and filenames can still appear in the worker log. Do not put secrets in filenames or URLs.
-- **Inline mode needs BotFather settings.** `/setinline` enables it and `/setinlinefeedback` must be 100%, otherwise the bot cannot edit the posted card. Inline jobs are authorized by the user who runs the query; the target chat is unknown to the bot. Inline cards cannot be deleted, so they are edited in place.
+- **Inline mode needs BotFather settings.** `/setinline` enables it. `/setinlinefeedback` at 100% makes the job start automatically when the result is picked; without it the posted card shows a **▶️ Start mirroring** button. Inline jobs are authorized by the user who runs the query; the target chat is unknown to the bot. Inline cards cannot be deleted, so they are edited in place.
 - **No inbound webhook.** The bot uses long polling, so commands are only handled while the PC or a fallback run is active.
 - **Datacenter IPs get blocked.** YouTube and other video sites often ask for a sign-in from GitHub's IPs, and BitTorrent traffic may be throttled. A file that works on your PC can still fail on the runner.
 - **End-of-run grace period.** A fallback run stops accepting new jobs before its time limit and waits up to 20 minutes for active jobs to finish.
@@ -441,7 +441,7 @@ In groups, use commands such as `/gf@YourBot <link>`. Plain links are ignored th
 
 ### Inline mode
 
-Type `@YourBot /gf <link>` in any chat, including a private chat with someone else, and pick the result. The bot posts the card in that chat and keeps editing it with live progress and the final link, so the result is visible to everyone there without opening a separate chat with the bot. `/px <link>` and `-dump boot,vendor` work the same way.
+Type `@YourBot /gf <link>` in any chat, including a private chat with someone else, and pick the result. If inline feedback is enabled in BotFather the job starts automatically. Otherwise the posted card shows **▶️ Start mirroring**; tap it once to start. The bot posts the card in that chat and keeps editing it with live progress and the final link, so the result is visible to everyone there without opening a separate chat with the bot. `/px <link>` and `-dump boot,vendor` work the same way.
 
 Inline mode is authorized by the Telegram account that types the query, not by the target chat, because Telegram does not reveal the target chat to the bot. When `ALLOWED_USER_IDS` is set, only those users can use it. Inline cards cannot be deleted by bots, so the completion card is edited in place instead of the delete-then-send used in normal chats. Reply-to-file is not available inline; send a direct link instead.
 

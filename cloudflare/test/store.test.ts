@@ -58,6 +58,64 @@ describe("Durable Object job store", () => {
     expect((second.job as { id: string }).id).toBe("abc12345");
   });
 
+  it("deduplicates inline jobs by inline_message_id", async () => {
+    const store = new JobStore({ storage: new MemoryStorage() });
+    const first = await op(store, {
+      op: "reserve",
+      job: { ...draft, inlineMessageId: "inline-1" },
+    });
+    const second = await op(store, {
+      op: "reserve",
+      job: {
+        ...draft,
+        id: "different",
+        dispatchKey: 100,
+        inlineMessageId: "inline-1",
+      },
+    });
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect((second.job as { id: string }).id).toBe("abc12345");
+  });
+
+  it("stores pending inline requests and only consumes them for the launcher", async () => {
+    const store = new JobStore({ storage: new MemoryStorage() });
+    const pending = {
+      userId: 42,
+      source: "https://example.com/file.bin",
+      host: "gofile",
+      dumpPartitions: [],
+      createdAt: Math.floor(Date.now() / 1000),
+    };
+    await op(store, { op: "putPending", token: "tok", pending });
+
+    const wrongUser = await op(store, {
+      op: "takePending",
+      token: "tok",
+      userId: 99,
+    });
+    expect(wrongUser.matched).toBe(false);
+    expect((wrongUser.pending as { userId: number }).userId).toBe(42);
+
+    const launcher = await op(store, {
+      op: "takePending",
+      token: "tok",
+      userId: 42,
+    });
+    expect(launcher.matched).toBe(true);
+    expect((launcher.pending as { source: string }).source).toBe(
+      "https://example.com/file.bin",
+    );
+
+    const again = await op(store, {
+      op: "takePending",
+      token: "tok",
+      userId: 42,
+    });
+    expect(again.pending).toBeNull();
+  });
+
   it("tracks message ids, runs, updates and removal", async () => {
     const storage = new MemoryStorage();
     const store = new JobStore({ storage });

@@ -47,6 +47,15 @@ export interface GroupCache {
   checkedAt: number;
 }
 
+/** An inline query waiting for its Start button to be pressed. */
+export interface PendingInline {
+  userId: number;
+  source: string;
+  host: Host;
+  dumpPartitions: string[];
+  createdAt: number;
+}
+
 /** The subset of the Durable Object storage API used by this project. */
 export interface DurableObjectStorageLike {
   get<T>(key: string): Promise<T | undefined>;

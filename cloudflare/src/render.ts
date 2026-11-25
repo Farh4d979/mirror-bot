@@ -13,12 +13,15 @@ export function cancelKeyboard(jobId: string): InlineKeyboard {
 
 /**
  * Telegram only returns inline_message_id for chosen inline results whose
- * message has an inline keyboard. Attach this placeholder so the Worker can
- * edit the card; it is replaced with the real Cancel button immediately.
+ * message has an inline keyboard. Attach this Start button so the card is
+ * editable even when inline feedback is disabled; once the job exists it is
+ * replaced with the real Cancel button.
  */
-export function pendingKeyboard(): InlineKeyboard {
+export function pendingKeyboard(token: string): InlineKeyboard {
   return {
-    inline_keyboard: [[{ text: "⏳ Starting…", callback_data: "inline:pending" }]],
+    inline_keyboard: [
+      [{ text: "▶️ Start mirroring", callback_data: `inline:start:${token}` }],
+    ],
   };
 }
 
@@ -166,7 +169,15 @@ export function renderInlinePending(
   if (dumpPartitions.length > 0) {
     lines.push(`🧩 ${htmlEscape(dumpPartitions.join(", "))}`);
   }
+  lines.push("", "Tap <b>▶️ Start mirroring</b> if it does not start automatically.");
   return lines.join("\n");
+}
+
+export function renderInlineExpired(): string {
+  return (
+    "⌛ <b>This mirror request expired.</b>\n"
+    + "Run the inline query again to start a new job."
+  );
 }
 
 export function renderInlineUsage(): string {
