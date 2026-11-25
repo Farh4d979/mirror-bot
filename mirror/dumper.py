@@ -994,6 +994,11 @@ def _stream_7z_member(
         raise failure[0]
     if code != 0:
         details = " | ".join(errors[-4:]) or "no details from 7-Zip"
+        if code == 1 and entry.size and destination.stat().st_size == entry.size:
+            # Exit code 1 is a warning (for example, trailing bytes after the
+            # archive). The requested member was still produced in full.
+            logger.warning("7-Zip warning for %s: %s", entry.name, details[:300])
+            return
         lowered = details.lower()
         if "password" in lowered or "encrypt" in lowered:
             raise DumpError(
