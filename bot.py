@@ -148,6 +148,55 @@ def _can_cancel(job: Job, user_id: int, settings: Settings) -> bool:
 
 
 # --------------------------------------------------------------- inline mode
+INLINE_PENDING_TTL = 24 * 60 * 60
+
+
+def _inline_pending_path(settings: Settings) -> Path:
+    return settings.state_file.with_name("inline-pending.json")
+
+
+def _inline_lock(context: ContextTypes.DEFAULT_TYPE) -> asyncio.Lock:
+    return context.application.bot_data.setdefault("inline_lock", asyncio.Lock())
+
+
+def _read_inline_pending(settings: Settings) -> dict[str, dict]:
+    data = load_state(_inline_pending_path(settings))
+    pending = data.get("pending")
+    if not isinstance(pending, dict):
+        return {}
+    cutoff = time.time() - INLINE_PENDING_TTL
+    cleaned: dict[str, dict] = {}
+    for token, value in pending.items():
+        if not isinstance(value, dict):
+            continue
+        try:
+            created_at = float(value.get("created_at", 0))
+        except (TypeError, ValueError):
+            continue
+        if created_at >= cutoff:
+            cleaned[str(token)] = value
+    return cleaned
+
+
+def _write_inline_pending(settings: Settings, pending: dict[str, dict]) -> None:
+    save_state(_inline_pending_path(settings), {"pending": pending})
+
+
+def _job_for_inline_message(
+    context: ContextTypes.DEFAULT_TYPE, inline_message_id: str
+) -> Optional[Job]:
+    remote = _remote_manager(context)
+    if remote is not None:
+        jobs = remote.active_jobs()
+    else:
+        manager: Optional[JobManager] = context.application.bot_data.get("manager")
+        jobs = manager.active_jobs() if manager is not None else []
+    for job in jobs:
+        if job.inline_message_id == inline_message_id:
+            return job
+    return None
+
+
 def _inline_usage_text() -> str:
     return (
         "Usage: <code>/gf &lt;link&gt; [-dump boot,vendor]</code>\n"
@@ -164,7 +213,16 @@ def _inline_pending_text(host: str, dump_partitions: Sequence[str]) -> str:
     ]
     if dump_partitions:
         lines.append(f"🧩 {html.escape(', '.join(dump_partitions))}")
+    lines.append("")
+    lines.append("Tap <b>▶️ Start mirroring</b> if it does not start automatically.")
     return "\n".join(lines)
+
+
+def _inline_expired_text() -> str:
+    return (
+        "⌛ <b>This mirror request expired.</b>\n"
+        "Run the inline query again to start a new job."
+    )
 
 
 def _inline_result(
@@ -187,10 +245,16 @@ def _inline_result(
     )
 
 
-def _inline_pending_keyboard() -> InlineKeyboardMarkup:
+def _inline_pending_keyboard(token: str) -> InlineKeyboardMarkup:
     """Telegram only returns inline_message_id for messages with a keyboard."""
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("⏳ Starting…", callback_data="inline:pending")]]
+        [
+            [
+                InlineKeyboardButton(
+                    "▶️ Start mirroring", callback_data=f"inline:start:{token}"
+                )
+            ]
+        ]
     )
 
 
@@ -922,6 +986,17 @@ async def on_inline_query(
             )
         ]
     else:
+        token = secrets.token_urlsafe(12)
+        async with _inline_lock(context):
+            pending = _read_inline_pending(settings)
+            pending[token] = {
+                "user_id": user.id,
+                "source": parsed["source"],
+                "host": host,
+                "dump_partitions": list(parsed["dump_partitions"]),
+                "created_at": time.time(),
+            }
+            _write_inline_pending(settings, pending)
         title = (
             "Mirror to Pixeldrain" if host == "pixeldrain" else "Mirror to Gofile"
         )
@@ -934,7 +1009,7 @@ async def on_inline_query(
                 title,
                 description,
                 _inline_pending_text(host, parsed["dump_partitions"]),
-                _inline_pending_keyboard(),
+                _inline_pending_keyboard(token),
             )
         ]
 
@@ -976,6 +1051,16 @@ async def on_chosen_inline_result(
             inline_message_id,
             error,
             keyboard=InlineKeyboardMarkup([]),
+        )
+        return
+
+    existing = _job_for_inline_message(context, inline_message_id)
+    if existing is not None:
+        await _edit_inline_card(
+            context.bot,
+            inline_message_id,
+            render_job(existing),
+            keyboard=_cancel_keyboard(existing.id),
         )
         return
 
@@ -1432,8 +1517,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     parts = query.data.split(":")
+    if parts[0] == "inline" and len(parts) >= 2 and parts[1] == "start":
+        await _handle_inline_start(
+            update, context, parts[2] if len(parts) > 2 else ""
+        )
+        return
     if parts[0] == "inline" and len(parts) == 2 and parts[1] == "pending":
-        await query.answer("The job is still starting. Try again in a few seconds.")
+        await query.answer(
+            "This card is outdated. Run the inline query again.", show_alert=True
+        )
+        inline_message_id = getattr(query, "inline_message_id", None)
+        if inline_message_id:
+            await _edit_inline_card(
+                context.bot,
+                inline_message_id,
+                _inline_expired_text(),
+                keyboard=InlineKeyboardMarkup([]),
+            )
         return
     if parts[0] == "pick":
         await query.answer(
@@ -1495,6 +1595,98 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     await query.answer()
+
+
+async def _handle_inline_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    token: str,
+) -> None:
+    """Start an inline card from its fallback button.
+
+    Telegram only sends ``chosen_inline_result`` when inline feedback is enabled
+    in BotFather. The Start button makes inline mode work without that setting.
+    """
+    settings: Settings = context.application.bot_data["settings"]
+    query = update.callback_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
+
+    inline_message_id = getattr(query, "inline_message_id", None)
+    if not inline_message_id:
+        await query.answer(
+            "This card cannot be started. Run the inline query again.",
+            show_alert=True,
+        )
+        return
+    if not token:
+        await query.answer("This button is invalid.", show_alert=True)
+        return
+
+    entry: Optional[dict] = None
+    async with _inline_lock(context):
+        pending = _read_inline_pending(settings)
+        candidate = pending.get(token)
+        if candidate is not None and candidate.get("user_id") != user.id:
+            await query.answer(
+                "Only the person who created this mirror can start it.",
+                show_alert=True,
+            )
+            return
+        if candidate is not None:
+            entry = candidate
+            pending.pop(token, None)
+            _write_inline_pending(settings, pending)
+
+    existing = _job_for_inline_message(context, inline_message_id)
+    if existing is not None:
+        await query.answer("This mirror is already running.")
+        await _edit_inline_card(
+            context.bot,
+            inline_message_id,
+            render_job(existing),
+            keyboard=_cancel_keyboard(existing.id),
+        )
+        return
+
+    if entry is None:
+        await query.answer(
+            "This mirror request expired. Run the inline query again.",
+            show_alert=True,
+        )
+        await _edit_inline_card(
+            context.bot,
+            inline_message_id,
+            _inline_expired_text(),
+            keyboard=InlineKeyboardMarkup([]),
+        )
+        return
+
+    source = str(entry.get("source") or "")
+    if not source:
+        await query.answer("This button is invalid.", show_alert=True)
+        return
+    host = "pixeldrain" if entry.get("host") == "pixeldrain" else "gofile"
+    dump_partitions = tuple(
+        str(part) for part in entry.get("dump_partitions") or () if part
+    )
+
+    await query.answer("Starting…")
+    job = new_job(
+        user_id=user.id,
+        chat_id=0,
+        source=source,
+        host=host,
+        user_name=(
+            getattr(user, "full_name", "")
+            or getattr(user, "first_name", "")
+            or f"User {user.id}"
+        ),
+        inline_message_id=inline_message_id,
+        dump_partitions=dump_partitions,
+    )
+    await _start_job(context, job, None)
 
 
 REMOTE_REFRESH_SECONDS = 15

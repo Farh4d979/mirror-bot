@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -37,6 +38,7 @@ class FakeUpdate:
         self.effective_chat = FakeChat(chat_type)
         self.effective_message = FakeMessage()
         self.callback_query = None
+        self.inline_query = None
 
 
 class FakeMember:
@@ -47,9 +49,43 @@ class FakeMember:
 class FakeBot:
     def __init__(self, statuses: dict[int, str] | None = None) -> None:
         self.statuses = statuses or {}
+        self.edits: list[dict] = []
 
     async def get_chat_member(self, chat_id: int, user_id: int) -> FakeMember:
         return FakeMember(self.statuses.get(user_id, "left"))
+
+    async def edit_message_text(self, **kwargs):
+        self.edits.append(kwargs)
+
+    async def send_message(self, chat_id, text, **kwargs):
+        return SimpleNamespace(message_id=1, chat_id=chat_id, text=text)
+
+
+class FakeInlineQuery:
+    def __init__(self, query: str) -> None:
+        self.id = "inline-query-1"
+        self.query = query
+        self.answers: list[tuple[list, dict]] = []
+
+    async def answer(self, results, **kwargs):
+        self.answers.append((results, kwargs))
+
+
+class FakeCallbackQuery:
+    def __init__(
+        self,
+        data: str,
+        *,
+        user_id: int = 1,
+        inline_message_id: str | None = "inline-message-1",
+    ) -> None:
+        self.data = data
+        self.from_user = SimpleNamespace(id=user_id)
+        self.inline_message_id = inline_message_id
+        self.answers: list[tuple[str | None, bool]] = []
+
+    async def answer(self, text=None, show_alert=False):
+        self.answers.append((text, show_alert))
 
 
 class FakeContext:
@@ -410,14 +446,195 @@ def test_parse_inline_request_rejects_an_unknown_command():
     assert "Usage:" in error
 
 
-def test_inline_result_attaches_the_placeholder_keyboard():
+def test_inline_result_attaches_the_start_keyboard():
     result = bot._inline_result(
         "gofile",
         "Mirror to Gofile",
         "https://example.com/file.bin",
         "Preparing",
-        bot._inline_pending_keyboard(),
+        bot._inline_pending_keyboard("abc123"),
     )
 
     button = result.reply_markup.inline_keyboard[0][0]
-    assert button.callback_data == "inline:pending"
+    assert button.callback_data == "inline:start:abc123"
+
+
+def test_inline_query_stores_a_pending_start_request(tmp_path):
+    settings = Settings(
+        telegram_token="token",
+        allowed_user_ids=frozenset({1}),
+        state_file=tmp_path / "telegram.json",
+    )
+    update = FakeUpdate(user_id=1)
+    update.inline_query = FakeInlineQuery(
+        "/px https://example.com/ota.zip -dump boot,vendor"
+    )
+    context = FakeContext(settings, [])
+
+    asyncio.run(bot.on_inline_query(update, context))
+
+    results, kwargs = update.inline_query.answers[0]
+    assert kwargs["cache_time"] == 0
+    button = results[0].reply_markup.inline_keyboard[0][0]
+    prefix = "inline:start:"
+    assert button.callback_data.startswith(prefix)
+    token = button.callback_data[len(prefix) :]
+
+    pending = bot._read_inline_pending(settings)
+    assert pending[token]["user_id"] == 1
+    assert pending[token]["source"] == "https://example.com/ota.zip"
+    assert pending[token]["host"] == "pixeldrain"
+    assert pending[token]["dump_partitions"] == ["boot", "vendor"]
+
+
+def _inline_pending_entry(**overrides):
+    entry = {
+        "user_id": 1,
+        "source": "https://example.com/ota.zip",
+        "host": "gofile",
+        "dump_partitions": ["boot"],
+        "created_at": time.time(),
+    }
+    entry.update(overrides)
+    return entry
+
+
+class FakeManager:
+    def __init__(self, jobs: list) -> None:
+        self.jobs = jobs
+
+    def active_jobs(self) -> list:
+        return list(self.jobs)
+
+
+def _run_inline_start(
+    monkeypatch, tmp_path, *, token, entry, user_id=1, manager_jobs=None
+):
+    settings = Settings(
+        telegram_token="token",
+        allowed_user_ids=frozenset({1}),
+        state_file=tmp_path / "telegram.json",
+    )
+    if entry is not None:
+        bot._write_inline_pending(settings, {token: entry})
+
+    update = FakeUpdate(user_id=user_id)
+    update.callback_query = FakeCallbackQuery(f"inline:start:{token}", user_id=user_id)
+    bot_instance = FakeBot()
+    context = FakeContext(settings, [], bot_instance=bot_instance)
+    if manager_jobs is not None:
+        context.application.bot_data["manager"] = FakeManager(manager_jobs)
+
+    started = []
+
+    async def fake_start(context, job, message):
+        started.append(job)
+
+    monkeypatch.setattr(bot, "_start_job", fake_start)
+    asyncio.run(bot.on_callback(update, context))
+    return started, update.callback_query, bot_instance, settings
+
+
+def test_inline_start_button_starts_the_job(monkeypatch, tmp_path):
+    token = "start-token"
+    started, query, _bot_instance, settings = _run_inline_start(
+        monkeypatch, tmp_path, token=token, entry=_inline_pending_entry()
+    )
+
+    assert len(started) == 1
+    job = started[0]
+    assert job.source == "https://example.com/ota.zip"
+    assert job.host == "gofile"
+    assert job.inline_message_id == "inline-message-1"
+    assert job.dump_partitions == ("boot",)
+    assert query.answers[-1][0] == "Starting…"
+    assert token not in bot._read_inline_pending(settings)
+
+
+def test_inline_start_button_is_launcher_only(monkeypatch, tmp_path):
+    token = "start-token"
+    started, query, _bot_instance, settings = _run_inline_start(
+        monkeypatch,
+        tmp_path,
+        token=token,
+        entry=_inline_pending_entry(user_id=2),
+    )
+
+    assert started == []
+    assert query.answers[-1] == (
+        "Only the person who created this mirror can start it.",
+        True,
+    )
+    assert token in bot._read_inline_pending(settings)
+
+
+def test_inline_start_button_rejects_an_expired_request(monkeypatch, tmp_path):
+    started, query, bot_instance, _settings = _run_inline_start(
+        monkeypatch, tmp_path, token="missing", entry=None
+    )
+
+    assert started == []
+    assert query.answers[-1] == (
+        "This mirror request expired. Run the inline query again.",
+        True,
+    )
+    assert bot_instance.edits[-1]["text"] == bot._inline_expired_text()
+    assert not bot_instance.edits[-1]["reply_markup"].inline_keyboard
+
+
+def test_inline_start_button_does_not_duplicate_a_running_job(monkeypatch, tmp_path):
+    existing = bot.new_job(
+        user_id=1,
+        chat_id=0,
+        source="https://example.com/ota.zip",
+        host="gofile",
+        user_name="User 1",
+        inline_message_id="inline-message-1",
+    )
+    started, query, bot_instance, _settings = _run_inline_start(
+        monkeypatch,
+        tmp_path,
+        token="start-token",
+        entry=_inline_pending_entry(),
+        manager_jobs=[existing],
+    )
+
+    assert started == []
+    assert query.answers[-1] == ("This mirror is already running.", False)
+    button = bot_instance.edits[-1]["reply_markup"].inline_keyboard[0][0]
+    assert button.callback_data == f"cancel:{existing.id}"
+
+
+def test_chosen_inline_result_does_not_duplicate_a_started_job(monkeypatch, tmp_path):
+    settings = Settings(
+        telegram_token="token",
+        allowed_user_ids=frozenset({1}),
+        state_file=tmp_path / "telegram.json",
+    )
+    existing = bot.new_job(
+        user_id=1,
+        chat_id=0,
+        source="https://example.com/ota.zip",
+        host="gofile",
+        user_name="User 1",
+        inline_message_id="inline-message-1",
+    )
+    update = FakeUpdate(user_id=1)
+    update.chosen_inline_result = SimpleNamespace(
+        inline_message_id="inline-message-1",
+        query="/gf https://example.com/other.zip",
+    )
+    bot_instance = FakeBot()
+    context = FakeContext(settings, [], bot_instance=bot_instance)
+    context.application.bot_data["manager"] = FakeManager([existing])
+    started = []
+
+    async def fake_start(context, job, message):
+        started.append(job)
+
+    monkeypatch.setattr(bot, "_start_job", fake_start)
+    asyncio.run(bot.on_chosen_inline_result(update, context))
+
+    assert started == []
+    button = bot_instance.edits[-1]["reply_markup"].inline_keyboard[0][0]
+    assert button.callback_data == f"cancel:{existing.id}"
