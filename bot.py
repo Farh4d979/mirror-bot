@@ -419,7 +419,7 @@ async def _start_remote_job(
                 context.bot,
                 job.inline_message_id,
                 render_final(job),
-                keyboard=None,
+                keyboard=InlineKeyboardMarkup([]),
             )
         else:
             await _edit_remote_card(
@@ -768,7 +768,7 @@ async def _deliver_final(
             context.bot,
             job.inline_message_id,
             final,
-            keyboard=None,
+            keyboard=InlineKeyboardMarkup([]),
         )
         return
     if message is None:

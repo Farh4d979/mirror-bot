@@ -246,6 +246,7 @@ def test_deliver_final_edits_an_inline_message_without_deleting():
     assert api.sent == []
     assert api.inline_edits[0][0] == "inline-1"
     assert api.inline_edits[0][1] == "done"
+    assert api.inline_edits[0][2] == {"inline_keyboard": []}
 
 
 def test_job_from_payload_accepts_an_inline_message_id():
