@@ -474,3 +474,38 @@ def test_unsafe_metadata_names_are_ignored():
     assert dumper._pick_partition("boot", ["boot/../../evil"]) is None
     assert dumper._pick_partition("boot", ["boot_../../evil"]) is None
     assert dumper._pick_partition("boot", ["boot_a"]) == "boot_a"
+
+
+def test_pick_partition_does_not_match_a_different_prefix():
+    assert dumper._pick_partition("vendor", ["vendor"]) == "vendor"
+    assert dumper._pick_partition("vendor", ["vendor_a", "vendor_b"]) == "vendor_a"
+    assert dumper._pick_partition("vendor", ["vendor_boot", "vendor_dlkm"]) is None
+    assert (
+        dumper._pick_partition("vendor_boot", ["vendor_boot_a", "vendor_boot_b"])
+        == "vendor_boot_a"
+    )
+    assert dumper._pick_partition("vendor_a", ["vendor"]) == "vendor"
+    assert dumper._pick_partition("vendor_a", ["vendor_b"]) is None
+
+
+def test_missing_vendor_is_not_replaced_by_vendor_boot(tmp_path):
+    data = b"B" * 4096
+    raw = build_super_image(
+        [{"name": "vendor_boot", "sectors": 8, "data": data}]
+    )
+    root = tmp_path / "files"
+    root.mkdir()
+    (root / "super.img").write_bytes(raw)
+
+    with pytest.raises(DumpError) as excinfo:
+        dumper.extract_partitions(
+            root,
+            ["vendor"],
+            tmp_path / "out",
+            settings=make_settings(tmp_path),
+            progress=lambda percent, detail: None,
+            cancel=CancelToken(),
+        )
+
+    assert "vendor_boot" in str(excinfo.value)
+    assert not (tmp_path / "out" / "vendor_boot.img").exists()

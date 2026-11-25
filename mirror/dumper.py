@@ -393,7 +393,12 @@ def _strip_slot(name: str) -> str:
 
 
 def _pick_partition(request: str, names: Iterable[str]) -> Optional[str]:
-    """Pick the best matching partition for a user-supplied name."""
+    """Pick the best matching partition for a user-supplied name.
+
+    Exact names win, then the usual ``_a``/``_b`` slot variants.  A different
+    partition such as ``vendor_boot`` must not satisfy a request for ``vendor``;
+    otherwise a missing partition silently produces the wrong image.
+    """
     # Partition names become file names, so never trust metadata or manifest
     # names that could escape the output directory.
     candidates = {
@@ -418,10 +423,7 @@ def _pick_partition(request: str, names: Iterable[str]) -> Optional[str]:
         candidate = request + suffix
         if candidate in candidates:
             return candidates[candidate]
-    variants = sorted(
-        name for name in candidates if name.startswith(request + "_")
-    )
-    return candidates[variants[0]] if variants else None
+    return None
 
 
 def _candidate_files(root: Path) -> list[Path]:
