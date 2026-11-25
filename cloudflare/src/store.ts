@@ -33,6 +33,7 @@ export interface StoreLike {
   markSeen(updateId: number): Promise<void>;
   reserve(job: NewJob): Promise<{ job: JobRecord; created: boolean }>;
   setMessage(id: string, messageId: number): Promise<JobRecord | null>;
+  setInlineMessage(id: string, inlineMessageId: string): Promise<JobRecord | null>;
   attachRun(id: string, runId: number, runUrl: string): Promise<JobRecord | null>;
   update(id: string, patch: Partial<JobRecord>): Promise<JobRecord | null>;
   remove(id: string): Promise<void>;
@@ -141,6 +142,14 @@ export class JobStore {
         return { job };
       }
 
+      case "setInlineMessage": {
+        const job = find(body.id);
+        if (!job) return { job: null };
+        job.inlineMessageId = String(body.inlineMessageId || "");
+        await this.save(state);
+        return { job };
+      }
+
       case "attachRun": {
         const job = find(body.id);
         if (!job) return { job: null };
@@ -164,6 +173,7 @@ export class JobStore {
           "error",
           "finishedAt",
           "messageId",
+          "inlineMessageId",
         ];
         for (const key of allowed) {
           if (key in patch) {
@@ -255,6 +265,18 @@ export class JobStoreClient implements StoreLike {
 
   async setMessage(id: string, messageId: number): Promise<JobRecord | null> {
     return (await this.op<{ job: JobRecord | null }>("setMessage", { id, messageId })).job;
+  }
+
+  async setInlineMessage(
+    id: string,
+    inlineMessageId: string,
+  ): Promise<JobRecord | null> {
+    return (
+      await this.op<{ job: JobRecord | null }>("setInlineMessage", {
+        id,
+        inlineMessageId,
+      })
+    ).job;
   }
 
   async attachRun(

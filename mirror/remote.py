@@ -80,6 +80,7 @@ def build_payload(
     file_id: Optional[str] = None,
     file_name: Optional[str] = None,
     file_size: Optional[int] = None,
+    inline_message_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Build the encrypted-at-rest description of one job."""
     return {
@@ -89,6 +90,11 @@ def build_payload(
         "user_name": job.user_name,
         "chat_id": job.chat_id,
         "message_id": int(message_id),
+        "inline_message_id": (
+            inline_message_id
+            if inline_message_id is not None
+            else job.inline_message_id
+        ),
         "source": job.source,
         "source_kind": job.source_kind,
         "host": job.host,
@@ -108,6 +114,7 @@ class RemoteRecord:
     message_id: int
     created_at: float
     state: str = "queued"
+    inline_message_id: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -120,6 +127,7 @@ class RemoteRecord:
             "host": self.job.host,
             "dump_partitions": list(self.job.dump_partitions),
             "message_id": self.message_id,
+            "inline_message_id": self.inline_message_id,
             "run_id": self.run_id,
             "run_url": self.run_url,
             "created_at": self.created_at,
@@ -200,6 +208,7 @@ class RemoteJobManager:
                     run_id=int(item["run_id"]),
                     run_url=str(item.get("run_url") or ""),
                     message_id=int(item.get("message_id") or 0),
+                    inline_message_id=str(item.get("inline_message_id") or ""),
                     created_at=created,
                     state=str(item.get("state") or "running"),
                 )
@@ -223,6 +232,7 @@ class RemoteJobManager:
         job: Job,
         *,
         message_id: int,
+        inline_message_id: Optional[str] = None,
         file_id: Optional[str] = None,
         file_name: Optional[str] = None,
         file_size: Optional[int] = None,
@@ -236,6 +246,7 @@ class RemoteJobManager:
                 file_id=file_id,
                 file_name=file_name,
                 file_size=file_size,
+                inline_message_id=inline_message_id,
             ),
         )
         run_id, run_url = self._dispatch(
@@ -257,6 +268,7 @@ class RemoteJobManager:
             run_id=run_id,
             run_url=run_url,
             message_id=int(message_id),
+            inline_message_id=str(inline_message_id or job.inline_message_id or ""),
             created_at=now,
         )
         with self._lock:

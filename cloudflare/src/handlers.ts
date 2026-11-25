@@ -9,6 +9,8 @@ import {
   renderCancelled,
   renderDumpUsage,
   renderFailed,
+  renderInlinePending,
+  renderInlineUsage,
   renderJob,
   renderStart,
   renderStatus,
@@ -17,7 +19,17 @@ import {
 } from "./render";
 import type { StoreLike } from "./store";
 import type { DeleteResult } from "./telegram";
-import type { JobRecord, NewJob, TgCallbackQuery, TgFile, TgMessage, TgUpdate } from "./types";
+import type {
+  JobRecord,
+  NewJob,
+  TgCallbackQuery,
+  TgChosenInlineResult,
+  TgFile,
+  TgInlineQuery,
+  TgMessage,
+  TgUpdate,
+  TgUser,
+} from "./types";
 import {
   DumpError,
   attachmentFilename,
@@ -48,11 +60,21 @@ export interface TelegramLike {
     text: string,
     replyMarkup?: InlineKeyboard,
   ): Promise<void>;
+  editInlineMessageText(
+    inlineMessageId: string,
+    text: string,
+    replyMarkup?: InlineKeyboard,
+  ): Promise<void>;
   deleteMessage(chatId: number, messageId: number): Promise<DeleteResult>;
   answerCallbackQuery(
     callbackQueryId: string,
     text?: string,
     showAlert?: boolean,
+  ): Promise<void>;
+  answerInlineQuery(
+    inlineQueryId: string,
+    results: Array<Record<string, unknown>>,
+    options?: { cacheTime?: number; isPersonal?: boolean },
   ): Promise<void>;
   getChatMember(chatId: number, userId: number): Promise<{ status: string }>;
   getMe(): Promise<{ id: number; username?: string }>;
@@ -176,6 +198,20 @@ async function deny(deps: HandlerDeps, message: TgMessage, userId: number): Prom
   await reply(deps, message, renderDenied(userId));
 }
 
+/** Edit a job card whether it lives in a chat or an inline message. */
+async function editJobCard(
+  deps: HandlerDeps,
+  job: JobRecord,
+  text: string,
+  keyboard?: InlineKeyboard,
+): Promise<void> {
+  if (job.inlineMessageId) {
+    await deps.tg.editInlineMessageText(job.inlineMessageId, text, keyboard);
+    return;
+  }
+  await deps.tg.editMessageText(job.chatId, job.messageId, text, keyboard);
+}
+
 export async function handleUpdate(deps: HandlerDeps, update: TgUpdate): Promise<void> {
   if (update.callback_query) {
     await handleCallback(deps, update.callback_query);
@@ -183,6 +219,18 @@ export async function handleUpdate(deps: HandlerDeps, update: TgUpdate): Promise
   }
   if (update.message) {
     await handleMessage(deps, update.message, update.update_id);
+    return;
+  }
+  if (update.inline_query) {
+    await handleInlineQuery(deps, update.inline_query);
+    return;
+  }
+  if (update.chosen_inline_result) {
+    await handleChosenInlineResult(
+      deps,
+      update.chosen_inline_result,
+      update.update_id,
+    );
   }
 }
 
@@ -220,7 +268,7 @@ async function handleMessage(
     const args = rest.trim() ? rest.trim().split(/\s+/).filter(Boolean) : [];
 
     if (command === "start" || command === "help") {
-      await reply(deps, message, renderStart());
+      await reply(deps, message, renderStart(await botUsername(deps)));
       return;
     }
     if (command === "id") {
@@ -279,8 +327,315 @@ async function handleMessage(
   );
 }
 
-async function handleLinkCommand(
+type InlineHost = "gofile" | "pixeldrain";
+
+type InlineParse =
+  | {
+      ok: true;
+      command: string;
+      host: InlineHost;
+      source: string;
+      dumpPartitions: string[];
+    }
+  | {
+      ok: false;
+      reason: "usage" | "dump_usage" | "invalid";
+      host: InlineHost;
+      message?: string;
+    };
+
+/** Parse the text after "@bot" in an inline query. */
+function parseInlineQuery(text: string): InlineParse {
+  const tokens = String(text || "").trim().split(/\s+/).filter(Boolean);
+  let command = "gf";
+  let host: InlineHost = "gofile";
+  let args = tokens;
+
+  if (tokens.length > 0 && tokens[0].startsWith("/")) {
+    const match = /^\/([A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?$/.exec(tokens[0]);
+    if (!match) return { ok: false, reason: "usage", host };
+    command = match[1].toLowerCase();
+    if (command !== "gf" && command !== "mirror" && command !== "px") {
+      return { ok: false, reason: "usage", host };
+    }
+    host = command === "px" ? "pixeldrain" : "gofile";
+    args = tokens.slice(1);
+  }
+
+  let source: string | null = null;
+  let sourceIndex = -1;
+  for (let index = 0; index < args.length; index += 1) {
+    const found = extractUrl(args[index]);
+    if (found) {
+      source = found;
+      sourceIndex = index;
+      break;
+    }
+  }
+  if (!source) return { ok: false, reason: "usage", host };
+
+  const remaining = args.filter((_, index) => index !== sourceIndex);
+  const { values, requested } = parseDumpArgs(remaining);
+  let dumpPartitions: string[];
+  try {
+    dumpPartitions = normalizePartitions(values);
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "invalid",
+      host,
+      message: error instanceof DumpError ? error.message : String(error),
+    };
+  }
+  if (requested && dumpPartitions.length === 0) {
+    return { ok: false, reason: "dump_usage", host };
+  }
+  return { ok: true, command, host, source, dumpPartitions };
+}
+
+function inlineResult(
+  id: string,
+  title: string,
+  description: string,
+  text: string,
+): Record<string, unknown> {
+  return {
+    type: "article",
+    id,
+    title,
+    description: description.slice(0, 200),
+    input_message_content: {
+      message_text: text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    },
+  };
+}
+
+function inlineErrorText(parsed: Extract<InlineParse, { ok: false }>): string {
+  if (parsed.reason === "invalid") {
+    return htmlEscape(parsed.message || "Invalid dump partition.");
+  }
+  if (parsed.reason === "dump_usage") return renderDumpUsage("gf");
+  return renderInlineUsage();
+}
+
+async function handleInlineQuery(
   deps: HandlerDeps,
+  query: TgInlineQuery,
+): Promise<void> {
+  const from = query.from;
+  if (!from || from.is_bot) return;
+
+  if (!privateAuthorized(deps, from.id)) {
+    await deps.tg.answerInlineQuery(
+      query.id,
+      [
+        inlineResult(
+          "denied",
+          "This bot is private",
+          "Tap to see your Telegram ID",
+          renderDenied(from.id),
+        ),
+      ],
+      { cacheTime: 0, isPersonal: true },
+    );
+    return;
+  }
+
+  const parsed = parseInlineQuery(query.query);
+  if (!parsed.ok) {
+    await deps.tg.answerInlineQuery(
+      query.id,
+      [
+        inlineResult(
+          "usage",
+          "Usage: /gf <link>",
+          "Example: /gf https://example.com/file.zip",
+          inlineErrorText(parsed),
+        ),
+      ],
+      { cacheTime: 0, isPersonal: true },
+    );
+    return;
+  }
+
+  console.log(
+    JSON.stringify({
+      level: "info",
+      msg: "Inline query",
+      user_id: from.id,
+      host: parsed.host,
+      dump_partitions: parsed.dumpPartitions.length,
+    }),
+  );
+  const title =
+    parsed.host === "pixeldrain" ? "Mirror to Pixeldrain" : "Mirror to Gofile";
+  const description = parsed.dumpPartitions.length
+    ? `${parsed.source} · dump ${parsed.dumpPartitions.join(", ")}`
+    : parsed.source;
+  await deps.tg.answerInlineQuery(
+    query.id,
+    [
+      inlineResult(
+        parsed.host,
+        title,
+        description,
+        renderInlinePending(parsed.host, parsed.dumpPartitions),
+      ),
+    ],
+    { cacheTime: 0, isPersonal: true },
+  );
+}
+
+async function handleChosenInlineResult(
+  deps: HandlerDeps,
+  chosen: TgChosenInlineResult,
+  updateId: number,
+): Promise<void> {
+  const from = chosen.from;
+  const inlineMessageId = String(chosen.inline_message_id || "");
+  if (!from || from.is_bot) return;
+  if (!inlineMessageId) {
+    console.log(
+      JSON.stringify({
+        level: "warn",
+        msg: "Chosen inline result has no inline_message_id; enable inline feedback in BotFather",
+        user_id: from.id,
+      }),
+    );
+    return;
+  }
+
+  if (!privateAuthorized(deps, from.id)) {
+    try {
+      await deps.tg.editInlineMessageText(
+        inlineMessageId,
+        renderDenied(from.id),
+        emptyKeyboard(),
+      );
+    } catch {
+      // Nothing else can be delivered without a chat id.
+    }
+    return;
+  }
+
+  const parsed = parseInlineQuery(chosen.query);
+  if (!parsed.ok) {
+    try {
+      await deps.tg.editInlineMessageText(
+        inlineMessageId,
+        inlineErrorText(parsed),
+        emptyKeyboard(),
+      );
+    } catch {
+      // Nothing else can be delivered without a chat id.
+    }
+    return;
+  }
+
+  await submitInlineJob(deps, {
+    updateId,
+    from,
+    source: parsed.source,
+    host: parsed.host,
+    dumpPartitions: parsed.dumpPartitions,
+    inlineMessageId,
+  });
+}
+
+async function submitInlineJob(
+  deps: HandlerDeps,
+  options: {
+    updateId: number;
+    from: TgUser;
+    source: string;
+    host: InlineHost;
+    dumpPartitions: string[];
+    inlineMessageId: string;
+  },
+): Promise<void> {
+  const { from, updateId, inlineMessageId } = options;
+  const now = nowSeconds(deps);
+  const draft: NewJob = {
+    id: deps.newId ? deps.newId() : randomJobId(),
+    dispatchKey: updateId,
+    userId: from.id,
+    userName: fullName({ ...from, id: from.id }),
+    chatId: 0,
+    messageId: 0,
+    inlineMessageId,
+    source: options.source,
+    sourceKind: "url",
+    host: options.host,
+    dumpPartitions: options.dumpPartitions,
+    fileId: null,
+    fileName: null,
+    fileSize: null,
+  };
+
+  let reserved: { job: JobRecord; created: boolean };
+  try {
+    reserved = await deps.store.reserve(draft);
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        level: "error",
+        msg: "Could not reserve inline job",
+        user_id: from.id,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return;
+  }
+  if (!reserved.created) {
+    console.log(
+      JSON.stringify({
+        level: "info",
+        msg: "Duplicate inline job dispatch ignored",
+        job_id: reserved.job.id,
+        dispatch_key: updateId,
+      }),
+    );
+    return;
+  }
+
+  const job = reserved.job;
+  console.log(
+    JSON.stringify({
+      level: "info",
+      msg: "Submitting inline job",
+      job_id: job.id,
+      user_id: job.userId,
+      host: job.host,
+      dump_partitions: job.dumpPartitions.length,
+    }),
+  );
+
+  try {
+    await editJobCard(
+      deps,
+      job,
+      renderJob(job, now),
+      cancelKeyboard(job.id),
+    );
+  } catch (error) {
+    console.log(
+      JSON.stringify({
+        level: "error",
+        msg: "Could not edit the inline job card",
+        job_id: job.id,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    await deps.store.remove(job.id);
+    return;
+  }
+
+  await dispatchReservedJob(deps, job);
+}
+
+async function handleLinkCommand(  deps: HandlerDeps,
   message: TgMessage,
   command: string,
   host: "gofile" | "pixeldrain",
@@ -536,6 +891,14 @@ async function submitJob(
     messageId: sent.message_id,
   };
 
+  await dispatchReservedJob(deps, job);
+}
+
+async function dispatchReservedJob(
+  deps: HandlerDeps,
+  job: JobRecord,
+): Promise<void> {
+  const now = nowSeconds(deps);
   const payload = buildPayload(job, deps.config);
 
   let token: string;
@@ -565,9 +928,9 @@ async function submitJob(
         detail: "Waiting for a GitHub Actions runner…",
       };
     try {
-      await deps.tg.editMessageText(
-        job.chatId,
-        job.messageId,
+      await editJobCard(
+        deps,
+        job,
         renderJob(job, now),
         cancelKeyboard(job.id),
       );
@@ -600,9 +963,9 @@ async function failDispatch(
     finishedAt: now,
   };
   try {
-    await deps.tg.editMessageText(
-      job.chatId,
-      job.messageId,
+    await editJobCard(
+      deps,
+      job,
       renderFailed(failed, "", now),
       emptyKeyboard(),
     );
@@ -643,9 +1006,9 @@ async function cancelJob(deps: HandlerDeps, job: JobRecord): Promise<CancelResul
 
 async function markCancelling(deps: HandlerDeps, job: JobRecord): Promise<void> {
   try {
-    await deps.tg.editMessageText(
-      job.chatId,
-      job.messageId,
+    await editJobCard(
+      deps,
+      job,
       renderJob(job, nowSeconds(deps)),
       emptyKeyboard(),
     );
@@ -702,6 +1065,9 @@ async function handleCallback(
       await deps.tg.answerCallbackQuery(query.id, "Not authorized.", true);
       return;
     }
+  } else if (query.inline_message_id && !privateAuthorized(deps, from.id)) {
+    await deps.tg.answerCallbackQuery(query.id, "Not authorized.", true);
+    return;
   }
 
   const parts = data.split(":");
@@ -740,9 +1106,9 @@ async function handleCallback(
       );
     } else {
       try {
-        await deps.tg.editMessageText(
-          job.chatId,
-          job.messageId,
+        await editJobCard(
+          deps,
+          job,
           "Could not cancel the GitHub Actions run. Try /cancel again.",
           emptyKeyboard(),
         );
@@ -763,6 +1129,20 @@ export async function deliverCancelled(
 ): Promise<void> {
   const now = nowSeconds(deps);
   const finished = { ...job, finishedAt: now };
+  if (job.inlineMessageId) {
+    try {
+      await editJobCard(
+        deps,
+        job,
+        renderCancelled(finished, now),
+        emptyKeyboard(),
+      );
+    } catch {
+      // Inline messages cannot be deleted; editing is the only option.
+    }
+    await deps.store.remove(job.id);
+    return;
+  }
   const deleted = await deps.tg.deleteMessage(job.chatId, job.messageId);
   if (deleted === "deleted" || deleted === "not_found") {
     try {
@@ -796,6 +1176,20 @@ export async function deliverFailed(
     error: job.error || "GitHub Actions stopped before the worker could report details.",
     finishedAt: now,
   };
+  if (job.inlineMessageId) {
+    try {
+      await editJobCard(
+        deps,
+        job,
+        renderFailed(finished, job.runUrl, now),
+        emptyKeyboard(),
+      );
+    } catch {
+      // Inline messages cannot be deleted; editing is the only option.
+    }
+    await deps.store.remove(job.id);
+    return;
+  }
   const deleted = await deps.tg.deleteMessage(job.chatId, job.messageId);
   if (deleted === "deleted") {
     try {

@@ -11,6 +11,8 @@ export interface JobRecord {
   userName: string;
   chatId: number;
   messageId: number;
+  /** Set when the job card lives in an inline message instead of a chat. */
+  inlineMessageId?: string | null;
   source: string;
   sourceKind: SourceKind;
   host: Host;
@@ -137,11 +139,29 @@ export interface TgCallbackQuery {
   id: string;
   from: TgUser;
   message?: TgMessage;
+  inline_message_id?: string;
   data?: string;
+}
+
+export interface TgInlineQuery {
+  id: string;
+  from: TgUser;
+  query: string;
+  offset: string;
+  chat_type?: string;
+}
+
+export interface TgChosenInlineResult {
+  result_id: string;
+  from: TgUser;
+  query: string;
+  inline_message_id?: string;
 }
 
 export interface TgUpdate {
   update_id: number;
   message?: TgMessage;
   callback_query?: TgCallbackQuery;
+  inline_query?: TgInlineQuery;
+  chosen_inline_result?: TgChosenInlineResult;
 }

@@ -108,6 +108,31 @@ export class TelegramAPI {
     }
   }
 
+  async editInlineMessageText(
+    inlineMessageId: string,
+    text: string,
+    replyMarkup?: InlineKeyboard,
+  ): Promise<void> {
+    const body: Record<string, unknown> = {
+      inline_message_id: inlineMessageId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    };
+    if (replyMarkup) body.reply_markup = replyMarkup;
+    try {
+      await this.call("editMessageText", body);
+    } catch (error) {
+      if (
+        error instanceof TelegramError &&
+        /message is not modified/i.test(error.message)
+      ) {
+        return;
+      }
+      throw error;
+    }
+  }
+
   async deleteMessage(chatId: number, messageId: number): Promise<DeleteResult> {
     try {
       await this.call("deleteMessage", { chat_id: chatId, message_id: messageId });
@@ -138,6 +163,19 @@ export class TelegramAPI {
     } catch {
       // The query may have expired; that is not worth failing the update.
     }
+  }
+
+  async answerInlineQuery(
+    inlineQueryId: string,
+    results: Array<Record<string, unknown>>,
+    options: { cacheTime?: number; isPersonal?: boolean } = {},
+  ): Promise<void> {
+    await this.call("answerInlineQuery", {
+      inline_query_id: inlineQueryId,
+      results,
+      cache_time: options.cacheTime ?? 0,
+      is_personal: options.isPersonal ?? true,
+    });
   }
 
   async getChatMember(

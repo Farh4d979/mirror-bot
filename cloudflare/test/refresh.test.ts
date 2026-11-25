@@ -41,6 +41,9 @@ class FakeStore implements StoreLike {
   async setMessage(): Promise<JobRecord | null> {
     return null;
   }
+  async setInlineMessage(): Promise<JobRecord | null> {
+    return null;
+  }
   async attachRun(): Promise<JobRecord | null> {
     return null;
   }
@@ -73,6 +76,8 @@ class FakeStore implements StoreLike {
 class FakeTelegram implements TelegramLike {
   readonly sent: string[] = [];
   readonly edits: string[] = [];
+  readonly inlineEdits: string[] = [];
+  readonly inlineAnswers: Array<Array<Record<string, unknown>>> = [];
   deleteResult: "deleted" | "not_found" | "error" = "deleted";
 
   async sendMessage(_chatId: number, text: string): Promise<{ message_id: number }> {
@@ -82,10 +87,22 @@ class FakeTelegram implements TelegramLike {
   async editMessageText(_chatId: number, _messageId: number, text: string): Promise<void> {
     this.edits.push(text);
   }
+  async editInlineMessageText(
+    _inlineMessageId: string,
+    text: string,
+  ): Promise<void> {
+    this.inlineEdits.push(text);
+  }
   async deleteMessage(): Promise<"deleted" | "not_found" | "error"> {
     return this.deleteResult;
   }
   async answerCallbackQuery(): Promise<void> {}
+  async answerInlineQuery(
+    _id: string,
+    results: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    this.inlineAnswers.push(results);
+  }
   async getChatMember(): Promise<{ status: string }> {
     return { status: "member" };
   }

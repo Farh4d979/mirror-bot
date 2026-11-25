@@ -45,6 +45,7 @@ class Job:
     source_kind: str = "url"  # url | torrent_file | telegram_file
     local_path: Optional[Path] = None
     telegram_file_id: Optional[str] = None
+    inline_message_id: Optional[str] = None
     status: str = "queued"
     stage: str = "queued"
     percent: Optional[float] = None
@@ -75,6 +76,7 @@ class Job:
                 "user_id": self.user_id,
                 "user_name": self.user_name,
                 "chat_id": self.chat_id,
+                "inline_message_id": self.inline_message_id,
                 "source": self.source,
                 "host": self.host,
                 "status": self.status,
@@ -366,6 +368,7 @@ def new_job(
     source_kind: str = "url",
     local_path: Optional[Path] = None,
     telegram_file_id: Optional[str] = None,
+    inline_message_id: Optional[str] = None,
     dump_partitions: Sequence[str] = (),
 ) -> Job:
     return Job(
@@ -378,5 +381,6 @@ def new_job(
         source_kind=source_kind,
         local_path=local_path,
         telegram_file_id=telegram_file_id,
+        inline_message_id=inline_message_id,
         dump_partitions=tuple(dump_partitions),
     )

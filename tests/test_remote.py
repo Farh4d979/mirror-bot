@@ -102,6 +102,31 @@ def test_build_payload_carries_the_worker_settings(tmp_path):
     }
 
 
+def test_dispatch_carries_an_inline_message_id(tmp_path):
+    settings = make_settings(tmp_path)
+    captured = {}
+
+    def fake_dispatch(repo, ref, payload, job_id, *, workflow):
+        captured["payload"] = payload
+        return 5, "https://github.com/owner/repo/actions/runs/5"
+
+    manager = remote.RemoteJobManager(
+        settings,
+        repo="owner/repo",
+        ref="main",
+        dispatch=fake_dispatch,
+    )
+    job = make_job()
+
+    record = manager.dispatch(job, message_id=0, inline_message_id="inline-1")
+
+    assert record.message_id == 0
+    assert record.inline_message_id == "inline-1"
+    decrypted = remote.decrypt_payload(settings.remote_job_key or "", captured["payload"])
+    assert decrypted["inline_message_id"] == "inline-1"
+    assert decrypted["message_id"] == 0
+
+
 def test_dispatch_encrypts_the_payload_and_tracks_the_run(tmp_path):
     settings = make_settings(tmp_path)
     calls = {}
@@ -150,6 +175,7 @@ def test_dispatch_encrypts_the_payload_and_tracks_the_run(tmp_path):
             "host": "gofile",
             "dump_partitions": [],
             "message_id": 99,
+            "inline_message_id": "",
             "run_id": 4242,
             "run_url": "https://github.com/owner/repo/actions/runs/4242",
             "created_at": record.created_at,

@@ -138,6 +138,33 @@ class TelegramAPI:
                 return
             raise
 
+    def edit_inline_message(
+        self,
+        inline_message_id: str,
+        text: str,
+        *,
+        reply_markup: Optional[dict[str, Any]] = None,
+    ) -> None:
+        try:
+            self._post(
+                "editMessageText",
+                {
+                    "inline_message_id": inline_message_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                    "reply_markup": (
+                        json.dumps(reply_markup, separators=(",", ":"))
+                        if reply_markup is not None
+                        else None
+                    ),
+                },
+            )
+        except TelegramAPIError as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            raise
+
     def delete_message(self, chat_id: int, message_id: int) -> bool:
         try:
             self._post(

@@ -17,6 +17,8 @@ from telegram import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     Message,
     Update,
 )
@@ -26,8 +28,10 @@ from telegram.ext import (
     Application,
     ApplicationHandlerStop,
     CallbackQueryHandler,
+    ChosenInlineResultHandler,
     CommandHandler,
     ContextTypes,
+    InlineQueryHandler,
     MessageHandler,
     TypeHandler,
     filters,
@@ -141,6 +145,86 @@ def _cancel_keyboard(job_id: str) -> InlineKeyboardMarkup:
 def _can_cancel(job: Job, user_id: int, settings: Settings) -> bool:
     """Only the job's launcher and configured admins may cancel it."""
     return job.user_id == user_id or user_id in settings.allowed_user_ids
+
+
+# --------------------------------------------------------------- inline mode
+def _inline_usage_text() -> str:
+    return (
+        "Usage: <code>/gf &lt;link&gt; [-dump boot,vendor]</code>\n"
+        "Inline mode can only mirror a direct link. Reply-to-file is not "
+        "available in inline mode."
+    )
+
+
+def _inline_pending_text(host: str, dump_partitions: Sequence[str]) -> str:
+    lines = [
+        "☁️ <b>GitHub Actions</b>",
+        "<i>Preparing the mirror job…</i>",
+        f"📦 {'Pixeldrain' if host == 'pixeldrain' else 'Gofile'}",
+    ]
+    if dump_partitions:
+        lines.append(f"🧩 {html.escape(', '.join(dump_partitions))}")
+    return "\n".join(lines)
+
+
+def _inline_result(
+    result_id: str, title: str, description: str, text: str
+) -> InlineQueryResultArticle:
+    return InlineQueryResultArticle(
+        id=result_id,
+        title=title,
+        description=description[:200],
+        input_message_content=InputTextMessageContent(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        ),
+    )
+
+
+def _parse_inline_request(text: str):
+    """Parse the text after ``@bot`` in an inline query."""
+    tokens = (text or "").strip().split()
+    command = "gf"
+    host = "gofile"
+    args = tokens
+    if tokens and tokens[0].startswith("/"):
+        first = tokens[0].split("@", 1)[0].lower()
+        command = first[1:]
+        if command not in {"gf", "mirror", "px"}:
+            return None, host, _inline_usage_text()
+        host = "pixeldrain" if command == "px" else "gofile"
+        args = tokens[1:]
+
+    source = None
+    source_index = None
+    for index, arg in enumerate(args):
+        found = extract_url(arg)
+        if found:
+            source = found
+            source_index = index
+            break
+    if source is None:
+        return None, host, _inline_usage_text()
+
+    remaining = [arg for index, arg in enumerate(args) if index != source_index]
+    _cleaned, dump_values, dump_requested = parse_dump_args(remaining)
+    try:
+        dump_partitions = normalize_partitions(dump_values)
+    except DumpError as exc:
+        return None, host, html.escape(str(exc))
+    if dump_requested and not dump_partitions:
+        return (
+            None,
+            host,
+            "Add partition names after <code>-dump</code>, e.g. "
+            "<code>/gf &lt;link&gt; -dump boot,vendor</code>.",
+        )
+    return (
+        {"source": source, "host": host, "dump_partitions": dump_partitions},
+        host,
+        None,
+    )
 
 
 # ---------------------------------------------------------------------- helpers
@@ -271,47 +355,55 @@ async def _start_remote_job(
         detail="Starting a GitHub Actions runner…",
     )
     text = render_job(job)
-    status_message = message
-    try:
-        if status_message is None:
-            status_message = await context.bot.send_message(
-                job.chat_id,
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=_cancel_keyboard(job.id),
-            )
-        else:
-            await status_message.edit_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=_cancel_keyboard(job.id),
-            )
-    except TelegramError:
-        logger.warning("Could not create the remote job status message", exc_info=True)
+    if job.inline_message_id:
+        await _edit_inline_card(
+            context.bot,
+            job.inline_message_id,
+            text,
+            keyboard=_cancel_keyboard(job.id),
+        )
+        message_id = 0
+    else:
+        status_message = message
         try:
-            status_message = await context.bot.send_message(
-                job.chat_id,
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=_cancel_keyboard(job.id),
-            )
+            if status_message is None:
+                status_message = await context.bot.send_message(
+                    job.chat_id,
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_cancel_keyboard(job.id),
+                )
+            else:
+                await status_message.edit_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_cancel_keyboard(job.id),
+                )
         except TelegramError:
-            logger.exception("Could not send the remote job status message")
+            logger.warning("Could not create the remote job status message", exc_info=True)
+            try:
+                status_message = await context.bot.send_message(
+                    job.chat_id,
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_cancel_keyboard(job.id),
+                )
+            except TelegramError:
+                logger.exception("Could not send the remote job status message")
+                _discard_upload(job.local_path)
+                return
+
+        message_id = int(getattr(status_message, "message_id", 0) or 0)
+        if message_id <= 0:
+            logger.error("The Telegram status message has no id; not dispatching job %s", job.id)
             _discard_upload(job.local_path)
             return
 
-    message_id = int(getattr(status_message, "message_id", 0) or 0)
-    if message_id <= 0:
-        logger.error("The Telegram status message has no id; not dispatching job %s", job.id)
-        _discard_upload(job.local_path)
-        return
-
     try:
-        await asyncio.to_thread(
-            remote.dispatch,
-            job,
-            message_id=message_id,
-        )
+        dispatch_kwargs = {"message_id": message_id}
+        if job.inline_message_id:
+            dispatch_kwargs["inline_message_id"] = job.inline_message_id
+        await asyncio.to_thread(remote.dispatch, job, **dispatch_kwargs)
     except Exception as exc:
         reason = str(exc) or type(exc).__name__
         logger.error("Could not dispatch job %s to GitHub Actions: %s", job.id, reason)
@@ -322,22 +414,60 @@ async def _start_remote_job(
             finished_at=time.time(),
         )
         _discard_upload(job.local_path)
+        if job.inline_message_id:
+            await _edit_inline_card(
+                context.bot,
+                job.inline_message_id,
+                render_final(job),
+                keyboard=None,
+            )
+        else:
+            await _edit_remote_card(
+                context.bot,
+                job.chat_id,
+                message_id,
+                render_final(job),
+                keyboard=None,
+            )
+        return
+
+    if job.inline_message_id:
+        await _edit_inline_card(
+            context.bot,
+            job.inline_message_id,
+            render_job(job),
+            keyboard=_cancel_keyboard(job.id),
+        )
+    else:
         await _edit_remote_card(
             context.bot,
             job.chat_id,
             message_id,
-            render_final(job),
-            keyboard=None,
+            render_job(job),
+            keyboard=_cancel_keyboard(job.id),
         )
-        return
 
-    await _edit_remote_card(
-        context.bot,
-        job.chat_id,
-        message_id,
-        render_job(job),
-        keyboard=_cancel_keyboard(job.id),
-    )
+
+async def _edit_inline_card(
+    bot,
+    inline_message_id: str,
+    text: str,
+    *,
+    keyboard,
+) -> None:
+    try:
+        await bot.edit_message_text(
+            inline_message_id=inline_message_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+    except BadRequest as exc:
+        if "not modified" not in str(exc).lower():
+            logger.debug("Inline status edit failed: %s", exc)
+    except TelegramError:
+        logger.debug("Inline message is no longer editable", exc_info=True)
 
 
 async def _edit_remote_card(
@@ -347,7 +477,16 @@ async def _edit_remote_card(
     text: str,
     *,
     keyboard,
+    inline_message_id: str = "",
 ) -> None:
+    if inline_message_id:
+        await _edit_inline_card(
+            bot,
+            inline_message_id,
+            text,
+            keyboard=keyboard,
+        )
+        return
     try:
         await bot.edit_message_text(
             chat_id=chat_id,
@@ -376,6 +515,24 @@ async def _deliver_remote_failure(bot, record: RemoteRecord) -> None:
     dependency install), the still-existing progress card is replaced here.
     """
     job = record.job
+    if record.inline_message_id:
+        job.update(
+            status="failed",
+            stage="failed",
+            error="GitHub Actions stopped before the worker could report details.",
+            finished_at=time.time(),
+        )
+        text = render_final(job)
+        if record.run_url:
+            url = html.escape(record.run_url, quote=True)
+            text += f'\n\n🔗 <a href="{url}">Actions run</a>'
+        await _edit_inline_card(
+            bot,
+            record.inline_message_id,
+            text,
+            keyboard=InlineKeyboardMarkup([]),
+        )
+        return
     if not record.message_id:
         return
     try:
@@ -427,6 +584,15 @@ async def _deliver_remote_cancelled(bot, record: RemoteRecord) -> None:
     )
     final = render_final(job)
 
+    if record.inline_message_id:
+        await _edit_inline_card(
+            bot,
+            record.inline_message_id,
+            final,
+            keyboard=InlineKeyboardMarkup([]),
+        )
+        return
+
     deleted = False
     if record.message_id:
         try:
@@ -476,6 +642,14 @@ async def _start_job(
     if not context.application.bot_data.get("accepting_jobs", True):
         _discard_upload(job.local_path)
         text = "The bot is finishing its current run. Send the file again in a few minutes."
+        if job.inline_message_id:
+            await _edit_inline_card(
+                context.bot,
+                job.inline_message_id,
+                text,
+                keyboard=InlineKeyboardMarkup([]),
+            )
+            return
         if message is not None:
             try:
                 await message.edit_text(text)
@@ -492,6 +666,21 @@ async def _start_job(
 
     manager: JobManager = context.application.bot_data["manager"]
     await manager.submit(job)
+
+    if job.inline_message_id:
+        await _edit_inline_card(
+            context.bot,
+            job.inline_message_id,
+            render_job(job),
+            keyboard=_cancel_keyboard(job.id),
+        )
+        reporters: set[asyncio.Task] = context.application.bot_data.setdefault(
+            "reporters", set()
+        )
+        task = asyncio.create_task(_report_job(context, job, None))
+        reporters.add(task)
+        task.add_done_callback(reporters.discard)
+        return
 
     text = render_job(job)
     status_message = message
@@ -531,7 +720,7 @@ async def _start_job(
 async def _report_job(
     context: ContextTypes.DEFAULT_TYPE,
     job: Job,
-    message: Message,
+    message: Optional[Message],
 ) -> None:
     last_text = ""
     while not job.finished:
@@ -540,11 +729,21 @@ async def _report_job(
         if text == last_text:
             continue
         try:
-            await message.edit_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=_cancel_keyboard(job.id),
-            )
+            if job.inline_message_id:
+                await _edit_inline_card(
+                    context.bot,
+                    job.inline_message_id,
+                    text,
+                    keyboard=_cancel_keyboard(job.id),
+                )
+            elif message is not None:
+                await message.edit_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_cancel_keyboard(job.id),
+                )
+            else:
+                continue
             last_text = text
         except BadRequest as exc:
             if "not modified" not in str(exc).lower():
@@ -560,10 +759,20 @@ async def _report_job(
 async def _deliver_final(
     context: ContextTypes.DEFAULT_TYPE,
     job: Job,
-    message: Message,
+    message: Optional[Message],
     final: str,
 ) -> None:
     """Delete the live progress message and post a clean completion message."""
+    if job.inline_message_id:
+        await _edit_inline_card(
+            context.bot,
+            job.inline_message_id,
+            final,
+            keyboard=None,
+        )
+        return
+    if message is None:
+        return
     try:
         await message.delete()
     except TelegramError:
@@ -611,6 +820,7 @@ async def _submit_job(
     status_message: Optional[Message] = None,
     host: str = "gofile",
     dump_partitions: Sequence[str] = (),
+    inline_message_id: Optional[str] = None,
 ) -> None:
     settings: Settings = context.application.bot_data["settings"]
     message = update.effective_message
@@ -658,10 +868,118 @@ async def _submit_job(
         source_kind=source_kind,
         local_path=local_path,
         telegram_file_id=telegram_file_id,
+        inline_message_id=inline_message_id,
         dump_partitions=dump_partitions,
     )
     job.update(file_name=file_name, file_size=file_size)
     await _start_job(context, job, status_message)
+
+
+# --------------------------------------------------------------------- inline
+async def on_inline_query(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    settings: Settings = context.application.bot_data["settings"]
+    query = update.inline_query
+    user = update.effective_user
+    if query is None or user is None:
+        return
+
+    if not _authorized(update, settings):
+        results = [
+            _inline_result(
+                "denied",
+                "This bot is private",
+                "Tap to see your Telegram ID",
+                "This bot is private.\n"
+                f"Your Telegram ID is <code>{user.id}</code> — add it to "
+                "ALLOWED_USER_IDS to get access.",
+            )
+        ]
+        await query.answer(results, cache_time=0, is_personal=True)
+        return
+
+    parsed, host, error = _parse_inline_request(query.query or "")
+    if error is not None:
+        results = [
+            _inline_result(
+                "usage",
+                "Usage: /gf <link>",
+                "Example: /gf https://example.com/file.zip",
+                error,
+            )
+        ]
+    else:
+        title = (
+            "Mirror to Pixeldrain" if host == "pixeldrain" else "Mirror to Gofile"
+        )
+        description = parsed["source"]
+        if parsed["dump_partitions"]:
+            description += " · dump " + ", ".join(parsed["dump_partitions"])
+        results = [
+            _inline_result(
+                host,
+                title,
+                description,
+                _inline_pending_text(host, parsed["dump_partitions"]),
+            )
+        ]
+
+    await query.answer(results, cache_time=0, is_personal=True)
+
+
+async def on_chosen_inline_result(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    settings: Settings = context.application.bot_data["settings"]
+    result = update.chosen_inline_result
+    user = update.effective_user
+    if result is None or user is None:
+        return
+
+    inline_message_id = getattr(result, "inline_message_id", None)
+    if not inline_message_id:
+        logger.warning(
+            "Chosen inline result has no inline_message_id; enable inline "
+            "feedback in BotFather"
+        )
+        return
+
+    if not _authorized(update, settings):
+        await _edit_inline_card(
+            context.bot,
+            inline_message_id,
+            "This bot is private.\n"
+            f"Your Telegram ID is <code>{user.id}</code> — add it to "
+            "ALLOWED_USER_IDS to get access.",
+            keyboard=InlineKeyboardMarkup([]),
+        )
+        return
+
+    parsed, host, error = _parse_inline_request(result.query or "")
+    if error is not None:
+        await _edit_inline_card(
+            context.bot,
+            inline_message_id,
+            error,
+            keyboard=InlineKeyboardMarkup([]),
+        )
+        return
+
+    job = new_job(
+        user_id=user.id,
+        chat_id=0,
+        source=parsed["source"],
+        host=host,
+        user_name=(
+            getattr(user, "full_name", "")
+            or getattr(user, "first_name", "")
+            or f"User {user.id}"
+        ),
+        inline_message_id=inline_message_id,
+        dump_partitions=parsed["dump_partitions"],
+    )
+    await _start_job(context, job, None)
 
 
 # -------------------------------------------------------------------- commands
@@ -680,6 +998,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if settings.remote_jobs
             else "I download it and upload it to Gofile or Pixeldrain, then reply "
             "with the public link.\n\n"
+        )
+        + (
+            f"<b>Inline mode</b>\n"
+            f"Type <code>@{context.bot.username} /gf &lt;link&gt;</code> in any "
+            "chat. The bot posts an inline card there and updates it with "
+            "progress and the final link. Inline mode only accepts direct "
+            "links.\n\n"
+            if context.bot.username
+            else ""
         )
         + "To mirror a file or GIF that is already in the chat, reply to it with "
         "<code>/gf</code> or <code>/px</code>. Other attachments are ignored. "
@@ -868,6 +1195,14 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _mark_remote_cancelling(bot, record: RemoteRecord) -> None:
+    if record.inline_message_id:
+        await _edit_inline_card(
+            bot,
+            record.inline_message_id,
+            render_job(record.job),
+            keyboard=InlineKeyboardMarkup([]),
+        )
+        return
     if record.message_id <= 0:
         return
     await _edit_remote_card(
@@ -1110,6 +1445,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer("Cancelling…")
             if await asyncio.to_thread(remote.cancel_job, job.id, user_id=user_id):
                 await _mark_remote_cancelling(context.bot, record)
+            elif record.inline_message_id:
+                await _edit_inline_card(
+                    context.bot,
+                    record.inline_message_id,
+                    "Could not cancel the GitHub Actions run. Try /cancel again.",
+                    keyboard=InlineKeyboardMarkup([]),
+                )
             else:
                 await _edit_remote_card(
                     context.bot,
@@ -1231,6 +1573,8 @@ def _register(app: Application, settings: Settings, manager: JobManager) -> None
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("handoff", cmd_handoff))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+    app.add_handler(InlineQueryHandler(on_inline_query))
+    app.add_handler(ChosenInlineResultHandler(on_chosen_inline_result))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_error_handler(on_error)
 

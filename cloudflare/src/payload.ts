@@ -16,6 +16,7 @@ export function buildPayload(
     user_name: job.userName,
     chat_id: job.chatId,
     message_id: job.messageId,
+    inline_message_id: job.inlineMessageId ?? null,
     source: job.source,
     source_kind: job.sourceKind,
     host: job.host,

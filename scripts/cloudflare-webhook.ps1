@@ -129,7 +129,12 @@ if ($Mode -eq "on") {
         $response = Invoke-TelegramApi "setWebhook" @{
             url = "$workerUrl/telegram"
             secret_token = $webhookSecret
-            allowed_updates = @("message", "callback_query")
+            allowed_updates = @(
+                "message",
+                "callback_query",
+                "inline_query",
+                "chosen_inline_result"
+            )
             drop_pending_updates = $true
             max_connections = 10
         }

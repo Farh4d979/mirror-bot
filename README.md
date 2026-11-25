@@ -36,6 +36,7 @@ Telegram link / replied file
 - Pixeldrain uploads (`/px`) use your Pixeldrain API key, with the free plan allowing 10 GB per file and Pro allowing 100 GB per file.
 - Pixeldrain file links (`pixeldrain.com/u/...`) are downloaded through Pixeldrain's API. When `PIXELDRAIN_API_KEY` is set, the bot authenticates the download so a Pro/Prepaid account uses its own transfer quota instead of the shared free per-IP quota.
 - Progress bars, cancel buttons, per-user job limits, size limits and timeouts.
+- **Inline mode:** type `@YourBot /gf <link>` in any chat and the bot posts the progress card and final link right there. Inline mode accepts direct links only.
 - Private DMs are restricted to `ALLOWED_USER_IDS`; groups work while at least one of those users is a member. Channels are ignored.
 - Runs on a Windows PC, Docker, or a small VPS. Telegram long polling means no open ports or domain are needed.
 - **Split mode:** the PC can act as a Telegram-only controller and send every download/upload job to a one-shot GitHub Actions worker. The PC stays at roughly 60-100 MB of RAM; the runner does the heavy work.
@@ -266,6 +267,8 @@ Actions busy indefinitely.
 
 2. **Create the Telegram bot.** Talk to [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token.
 
+   For inline mode, also send `/setinline` to BotFather, pick the bot, and enter a placeholder such as `Mirror a link…`. Then send `/setinlinefeedback`, pick the bot, and choose **100%**. Without the feedback setting Telegram never tells the bot which inline message was posted, so the card cannot be updated. These two settings can only be changed in BotFather; the Bot API cannot enable them.
+
 3. **Get your Telegram user ID.** Message [@userinfobot](https://t.me/userinfobot), or leave `ALLOWED_USER_IDS` empty for the first run, start the bot and send `/id`.
 
 4. **Add repository secrets** (Settings → Secrets and variables → Actions → Secrets):
@@ -294,6 +297,7 @@ Actions busy indefinitely.
 - **Disk is limited.** The standard runner has about 14 GB of SSD. A single file must fit on the runner; the practical ceiling is roughly 12 GB. Set `MAX_FILE_SIZE` if you want a hard cap.
 - **State commits.** The fallback workflow pushes a tiny state commit (`chore: update bot state [skip ci]`) when the Telegram offset changes. If `main` is protected, allow GitHub Actions to push, or change the workflow to use a cache instead. The PC passes its current offset into the fallback run so already-handled updates are not replayed.
 - **Actions logs are public in a public repo.** The job payload is encrypted, but host errors and filenames can still appear in the worker log. Do not put secrets in filenames or URLs.
+- **Inline mode needs BotFather settings.** `/setinline` enables it and `/setinlinefeedback` must be 100%, otherwise the bot cannot edit the posted card. Inline jobs are authorized by the user who runs the query; the target chat is unknown to the bot. Inline cards cannot be deleted, so they are edited in place.
 - **No inbound webhook.** The bot uses long polling, so commands are only handled while the PC or a fallback run is active.
 - **Datacenter IPs get blocked.** YouTube and other video sites often ask for a sign-in from GitHub's IPs, and BitTorrent traffic may be throttled. A file that works on your PC can still fail on the runner.
 - **End-of-run grace period.** A fallback run stops accepting new jobs before its time limit and waits up to 20 minutes for active jobs to finish.
@@ -434,6 +438,12 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go and gallery-dl. D
 Send a link or a magnet link directly. To mirror a file, GIF or `.torrent` that is already in the chat, reply to it with `/gf`, `/mirror`, or `/px`. Attachments sent without one of those commands are ignored. Cloud bots can download replied attachments up to 20 MB.
 
 In groups, use commands such as `/gf@YourBot <link>`. Plain links are ignored there so the bot does not reply to every message. Private chats are owner-only; a group is enabled while at least one `ALLOWED_USER_IDS` member is in it.
+
+### Inline mode
+
+Type `@YourBot /gf <link>` in any chat, including a private chat with someone else, and pick the result. The bot posts the card in that chat and keeps editing it with live progress and the final link, so the result is visible to everyone there without opening a separate chat with the bot. `/px <link>` and `-dump boot,vendor` work the same way.
+
+Inline mode is authorized by the Telegram account that types the query, not by the target chat, because Telegram does not reveal the target chat to the bot. Only `ALLOWED_USER_IDS` can use it. Inline cards cannot be deleted by bots, so the completion card is edited in place instead of the delete-then-send used in normal chats. Reply-to-file is not available inline; send a direct link instead.
 
 ### Android partition dumps (`-dump`)
 

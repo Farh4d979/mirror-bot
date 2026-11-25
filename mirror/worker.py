@@ -96,7 +96,8 @@ def job_from_payload(
         message_id = int(payload["message_id"])
     except (KeyError, TypeError, ValueError) as exc:
         raise RemoteJobError("The job payload is missing required fields.") from exc
-    if not job_id or message_id <= 0:
+    inline_message_id = str(payload.get("inline_message_id") or "").strip() or None
+    if not job_id or (message_id <= 0 and not inline_message_id):
         raise RemoteJobError("The job payload has an invalid job or message id.")
 
     source_kind = str(payload.get("source_kind") or "url")
@@ -140,6 +141,7 @@ def job_from_payload(
         user_name=str(payload.get("user_name") or ""),
         source_kind=source_kind,
         telegram_file_id=file_id,
+        inline_message_id=inline_message_id,
         status="running",
         stage="resolving",
         detail="Starting on GitHub Actions…",
@@ -178,12 +180,19 @@ class ProgressReporter:
         if not force and now - self.last_edit < self.interval:
             return
         try:
-            self.api.edit_message(
-                self.job.chat_id,
-                self.message_id,
-                text,
-                reply_markup=_cancel_keyboard(self.job.id),
-            )
+            if self.job.inline_message_id:
+                self.api.edit_inline_message(
+                    self.job.inline_message_id,
+                    text,
+                    reply_markup=_cancel_keyboard(self.job.id),
+                )
+            else:
+                self.api.edit_message(
+                    self.job.chat_id,
+                    self.message_id,
+                    text,
+                    reply_markup=_cancel_keyboard(self.job.id),
+                )
         except TelegramAPIError as exc:
             logger.warning("Could not update the progress message: %s", exc)
         else:
@@ -191,6 +200,13 @@ class ProgressReporter:
         self.last_edit = now
 
     def edit_final(self, text: str) -> None:
+        if self.job.inline_message_id:
+            self.api.edit_inline_message(
+                self.job.inline_message_id,
+                text,
+                reply_markup=_empty_keyboard(),
+            )
+            return
         self.api.edit_message(
             self.job.chat_id,
             self.message_id,
@@ -203,6 +219,17 @@ def _deliver_final(
     api: TelegramAPI, job: Job, message_id: int, text: str
 ) -> None:
     """Delete the live message and send a clean result card."""
+    if job.inline_message_id:
+        try:
+            api.edit_inline_message(
+                job.inline_message_id,
+                text,
+                reply_markup=_empty_keyboard(),
+            )
+        except TelegramAPIError as exc:
+            logger.error("Could not edit the inline result card: %s", exc)
+        return
+
     deleted = False
     try:
         deleted = api.delete_message(job.chat_id, message_id)
@@ -365,11 +392,12 @@ def main() -> int:
         return 2
 
     logger.info(
-        "Worker starting job %s (%s, host=%s, dump=%s)",
+        "Worker starting job %s (%s, host=%s, dump=%s, inline=%s)",
         job.id,
         job.source_kind,
         job.host,
         ",".join(job.dump_partitions) or "no",
+        "yes" if job.inline_message_id else "no",
     )
     try:
         return _run_job(api, job, message_id, settings)

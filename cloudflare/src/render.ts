@@ -96,12 +96,17 @@ export function renderStatus(
   return lines.join("\n");
 }
 
-export function renderStart(): string {
+export function renderStart(botUsername = ""): string {
+  const inlineHandle = botUsername ? `@${botUsername}` : "@YourBot";
   return (
     "<b>Mirror bot</b>\n\n"
     + "Send me a link or a magnet link. This Cloudflare Worker only handles "
     + "Telegram commands. A GitHub Actions worker downloads it and uploads it "
     + "to Gofile or Pixeldrain, then replies with the public link.\n\n"
+    + "<b>Inline mode</b>\n"
+    + `Type <code>${htmlEscape(inlineHandle)} /gf &lt;link&gt;</code> in any chat. `
+    + "The bot posts an inline card there and updates it with progress and the "
+    + "final link. Inline mode only accepts direct links, not replied files.\n\n"
     + "To mirror a file or GIF that is already in the chat, reply to it with "
     + "<code>/gf</code> or <code>/px</code>. Other attachments are ignored. "
     + "Telegram bots can download replied attachments up to 20 MB; send a link "
@@ -135,6 +140,29 @@ export function renderDumpUsage(command: string): string {
   return (
     "Add partition names after <code>-dump</code>, e.g. " +
     `<code>/${command} &lt;link&gt; -dump boot,vendor</code>.`
+  );
+}
+
+export function renderInlinePending(
+  host: "gofile" | "pixeldrain",
+  dumpPartitions: string[] = [],
+): string {
+  const lines = [
+    "☁️ <b>GitHub Actions</b>",
+    "<i>Preparing the mirror job…</i>",
+    `📦 ${host === "pixeldrain" ? "Pixeldrain" : "Gofile"}`,
+  ];
+  if (dumpPartitions.length > 0) {
+    lines.push(`🧩 ${htmlEscape(dumpPartitions.join(", "))}`);
+  }
+  return lines.join("\n");
+}
+
+export function renderInlineUsage(): string {
+  return (
+    "Usage: <code>/gf &lt;link&gt; [-dump boot,vendor]</code>\n"
+    + "Inline mode can only mirror a direct link. Reply-to-file is not "
+    + "available in inline mode."
   );
 }
 

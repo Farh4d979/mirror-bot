@@ -2,14 +2,22 @@ import { describe, expect, it } from "vitest";
 import type { Config } from "../src/config";
 import { decryptPayload } from "../src/fernet";
 import type { GitHubLike } from "../src/handlers";
-import { handleUpdate, type HandlerDeps, type TelegramLike } from "../src/handlers";
+import {
+  handleUpdate,
+  deliverCancelled,
+  deliverFailed,
+  type HandlerDeps,
+  type TelegramLike,
+} from "../src/handlers";
 import type { StoreLike } from "../src/store";
 import type {
   GroupCache,
   JobRecord,
   NewJob,
   TgCallbackQuery,
+  TgChosenInlineResult,
   TgFile,
+  TgInlineQuery,
   TgMessage,
   TgUpdate,
 } from "../src/types";
@@ -76,6 +84,16 @@ class FakeStore implements StoreLike {
     return job;
   }
 
+  async setInlineMessage(
+    id: string,
+    inlineMessageId: string,
+  ): Promise<JobRecord | null> {
+    const job = this.jobs.get(id);
+    if (!job) return null;
+    job.inlineMessageId = inlineMessageId;
+    return job;
+  }
+
   async attachRun(id: string, runId: number, runUrl: string): Promise<JobRecord | null> {
     const job = this.jobs.get(id);
     if (!job) return null;
@@ -127,6 +145,16 @@ class FakeTelegram implements TelegramLike {
     messageId: number;
   }> = [];
   readonly edits: Array<{ chatId: number; messageId: number; text: string }> = [];
+  readonly inlineEdits: Array<{
+    inlineMessageId: string;
+    text: string;
+    keyboard?: unknown;
+  }> = [];
+  readonly inlineAnswers: Array<{
+    id: string;
+    results: Array<Record<string, unknown>>;
+    options?: { cacheTime?: number; isPersonal?: boolean };
+  }> = [];
   readonly answers: Array<{ id: string; text?: string; alert?: boolean }> = [];
   memberStatus = "member";
   nextMessageId = 100;
@@ -148,6 +176,22 @@ class FakeTelegram implements TelegramLike {
     text: string,
   ): Promise<void> {
     this.edits.push({ chatId, messageId, text });
+  }
+
+  async editInlineMessageText(
+    inlineMessageId: string,
+    text: string,
+    keyboard?: unknown,
+  ): Promise<void> {
+    this.inlineEdits.push({ inlineMessageId, text, keyboard });
+  }
+
+  async answerInlineQuery(
+    id: string,
+    results: Array<Record<string, unknown>>,
+    options?: { cacheTime?: number; isPersonal?: boolean },
+  ): Promise<void> {
+    this.inlineAnswers.push({ id, results, options });
   }
 
   async deleteMessage(): Promise<"deleted"> {
@@ -503,5 +547,152 @@ describe("status and cancel commands", () => {
     await handleUpdate(deps, update(message({ message_id: 3, text: "/cancel" }), 3));
     expect(gh.cancelled).toEqual([100]);
     expect(tg.sent.at(-1)?.text).toContain("Cancelling 1 job(s)");
+  });
+});
+
+function inlineQuery(overrides: Partial<TgInlineQuery> = {}): TgInlineQuery {
+  return {
+    id: "iq-1",
+    from: user,
+    query: "/gf https://example.com/file.bin",
+    offset: "",
+    ...overrides,
+  };
+}
+
+function chosenInline(
+  overrides: Partial<TgChosenInlineResult> = {},
+): TgChosenInlineResult {
+  return {
+    result_id: "gofile",
+    from: user,
+    query: "/gf https://example.com/file.bin",
+    inline_message_id: "inline-1",
+    ...overrides,
+  };
+}
+
+describe("inline mode", () => {
+  it("answers an inline query without creating a job", async () => {
+    const { deps, tg, gh } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 5,
+      inline_query: inlineQuery({
+        query: "/gf https://example.com/file.bin -dump boot,vendor",
+      }),
+    });
+
+    expect(gh.dispatched).toHaveLength(0);
+    expect(tg.inlineAnswers).toHaveLength(1);
+    expect(tg.inlineAnswers[0].options).toMatchObject({
+      cacheTime: 0,
+      isPersonal: true,
+    });
+    const result = tg.inlineAnswers[0].results[0] as {
+      title: string;
+      input_message_content: { message_text: string };
+    };
+    expect(result.title).toBe("Mirror to Gofile");
+    expect(result.input_message_content.message_text).toContain("boot, vendor");
+  });
+
+  it("dispatches a chosen inline result with inline_message_id", async () => {
+    const { deps, store, tg, gh } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 6,
+      chosen_inline_result: chosenInline({
+        query: "/px https://example.com/a.bin -dump boot",
+      }),
+    });
+
+    expect(gh.dispatched).toHaveLength(1);
+    const payload = await payloadOf(gh);
+    expect(payload).toMatchObject({
+      chat_id: 0,
+      message_id: 0,
+      inline_message_id: "inline-1",
+      host: "pixeldrain",
+      dump_partitions: ["boot"],
+    });
+    expect(tg.sent).toHaveLength(0);
+    expect(tg.inlineEdits.at(-1)?.inlineMessageId).toBe("inline-1");
+    expect(store.jobs.get(gh.dispatched[0].jobId)?.inlineMessageId).toBe(
+      "inline-1",
+    );
+  });
+
+  it("denies inline queries from other users", async () => {
+    const { deps, tg, gh } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 7,
+      inline_query: inlineQuery({ from: { id: 99, first_name: "Other" } }),
+    });
+
+    expect(gh.dispatched).toHaveLength(0);
+    const result = tg.inlineAnswers[0].results[0] as { title: string };
+    expect(result.title).toBe("This bot is private");
+  });
+
+  it("ignores a chosen result without inline_message_id", async () => {
+    const { deps, gh } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 8,
+      chosen_inline_result: chosenInline({ inline_message_id: undefined }),
+    });
+
+    expect(gh.dispatched).toHaveLength(0);
+  });
+
+  it("cancels an inline job from its callback button", async () => {
+    const { deps, tg, gh } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 9,
+      chosen_inline_result: chosenInline(),
+    });
+    const jobId = gh.dispatched[0].jobId;
+    const callback: TgCallbackQuery = {
+      id: "cb-inline",
+      from: user,
+      inline_message_id: "inline-1",
+      data: `cancel:${jobId}`,
+    };
+
+    await handleUpdate(deps, { update_id: 10, callback_query: callback });
+
+    expect(gh.cancelled).toEqual([100]);
+    expect(tg.answers.at(-1)?.text).toBe("Cancelling…");
+    expect(tg.inlineEdits.at(-1)?.text).toContain("Cancelling");
+  });
+
+  it("edits the inline card when a cancelled run finishes", async () => {
+    const { deps, store, tg, gh } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 11,
+      chosen_inline_result: chosenInline(),
+    });
+    const job = store.jobs.get(gh.dispatched[0].jobId);
+    expect(job).toBeTruthy();
+
+    await deliverCancelled(deps, job!);
+
+    expect(tg.inlineEdits.at(-1)?.text).toContain("Job cancelled");
+    expect(tg.sent).toHaveLength(0);
+    expect(store.jobs.has(job!.id)).toBe(false);
+  });
+
+  it("edits the inline card when a run fails without a worker report", async () => {
+    const { deps, store, tg, gh } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 12,
+      chosen_inline_result: chosenInline(),
+    });
+    const job = store.jobs.get(gh.dispatched[0].jobId);
+    expect(job).toBeTruthy();
+
+    await deliverFailed(deps, job!);
+
+    expect(tg.inlineEdits.at(-1)?.text).toContain("Job failed");
+    expect(tg.sent).toHaveLength(0);
+    expect(store.jobs.has(job!.id)).toBe(false);
   });
 });

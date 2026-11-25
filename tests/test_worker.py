@@ -141,12 +141,16 @@ def test_worker_settings_reject_invalid_limits():
 class FakeAPI:
     def __init__(self) -> None:
         self.edits = []
+        self.inline_edits = []
         self.deleted = []
         self.sent = []
         self.delete_result = True
 
     def edit_message(self, chat_id, message_id, text, *, reply_markup=None):
         self.edits.append((chat_id, message_id, text, reply_markup))
+
+    def edit_inline_message(self, inline_message_id, text, *, reply_markup=None):
+        self.inline_edits.append((inline_message_id, text, reply_markup))
 
     def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
@@ -213,6 +217,48 @@ def test_deliver_final_edits_when_delete_is_not_allowed():
     assert api.edits
     assert api.edits[0][2] == "done"
     assert api.sent == []
+
+
+def test_progress_reporter_edits_an_inline_message():
+    api = FakeAPI()
+    job = running_job()
+    job.update(inline_message_id="inline-1")
+    reporter = worker.ProgressReporter(api, job, 0, interval=0)
+
+    reporter(force=True)
+
+    assert api.edits == []
+    assert len(api.inline_edits) == 1
+    inline_message_id, text, keyboard = api.inline_edits[0]
+    assert inline_message_id == "inline-1"
+    assert "Downloading" in text
+    assert keyboard["inline_keyboard"][0][0]["callback_data"] == f"cancel:{job.id}"
+
+
+def test_deliver_final_edits_an_inline_message_without_deleting():
+    api = FakeAPI()
+    job = running_job()
+    job.update(inline_message_id="inline-1")
+
+    worker._deliver_final(api, job, 0, "done")
+
+    assert api.deleted == []
+    assert api.sent == []
+    assert api.inline_edits[0][0] == "inline-1"
+    assert api.inline_edits[0][1] == "done"
+
+
+def test_job_from_payload_accepts_an_inline_message_id():
+    payload = base_payload(
+        chat_id=0,
+        message_id=0,
+        inline_message_id="inline-1",
+    )
+
+    job, message_id = worker.job_from_payload(payload, make_settings())
+
+    assert message_id == 0
+    assert job.inline_message_id == "inline-1"
 
 
 def test_job_from_payload_defaults_unknown_file_size():

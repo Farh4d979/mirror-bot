@@ -49,6 +49,7 @@ describe("GitHub Actions payload", () => {
       user_name: "Test User",
       chat_id: -100,
       message_id: 7,
+      inline_message_id: null,
       source: "https://example.com/file.bin",
       source_kind: "url",
       host: "gofile",
