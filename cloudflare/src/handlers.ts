@@ -6,6 +6,7 @@ import type { InlineKeyboard } from "./render";
 import {
   cancelKeyboard,
   emptyKeyboard,
+  pendingKeyboard,
   renderCancelled,
   renderDumpUsage,
   renderFailed,
@@ -398,8 +399,9 @@ function inlineResult(
   title: string,
   description: string,
   text: string,
+  keyboard?: InlineKeyboard,
 ): Record<string, unknown> {
-  return {
+  const result: Record<string, unknown> = {
     type: "article",
     id,
     title,
@@ -410,6 +412,8 @@ function inlineResult(
       disable_web_page_preview: true,
     },
   };
+  if (keyboard) result.reply_markup = keyboard;
+  return result;
 }
 
 function inlineErrorText(parsed: Extract<InlineParse, { ok: false }>): string {
@@ -482,6 +486,7 @@ async function handleInlineQuery(
         title,
         description,
         renderInlinePending(parsed.host, parsed.dumpPartitions),
+        pendingKeyboard(),
       ),
     ],
     { cacheTime: 0, isPersonal: true },
@@ -1071,6 +1076,13 @@ async function handleCallback(
   }
 
   const parts = data.split(":");
+  if (parts[0] === "inline" && parts[1] === "pending") {
+    await deps.tg.answerCallbackQuery(
+      query.id,
+      "The job is still starting. Try again in a few seconds.",
+    );
+    return;
+  }
   if (parts[0] === "pick") {
     await deps.tg.answerCallbackQuery(
       query.id,

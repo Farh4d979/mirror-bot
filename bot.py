@@ -168,7 +168,11 @@ def _inline_pending_text(host: str, dump_partitions: Sequence[str]) -> str:
 
 
 def _inline_result(
-    result_id: str, title: str, description: str, text: str
+    result_id: str,
+    title: str,
+    description: str,
+    text: str,
+    keyboard: Optional[InlineKeyboardMarkup] = None,
 ) -> InlineQueryResultArticle:
     return InlineQueryResultArticle(
         id=result_id,
@@ -179,6 +183,14 @@ def _inline_result(
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         ),
+        reply_markup=keyboard,
+    )
+
+
+def _inline_pending_keyboard() -> InlineKeyboardMarkup:
+    """Telegram only returns inline_message_id for messages with a keyboard."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⏳ Starting…", callback_data="inline:pending")]]
     )
 
 
@@ -922,6 +934,7 @@ async def on_inline_query(
                 title,
                 description,
                 _inline_pending_text(host, parsed["dump_partitions"]),
+                _inline_pending_keyboard(),
             )
         ]
 
@@ -1419,6 +1432,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     parts = query.data.split(":")
+    if parts[0] == "inline" and len(parts) == 2 and parts[1] == "pending":
+        await query.answer("The job is still starting. Try again in a few seconds.")
+        return
     if parts[0] == "pick":
         await query.answer(
             "That menu is no longer used. Send the link again.", show_alert=True

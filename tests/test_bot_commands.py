@@ -408,3 +408,16 @@ def test_parse_inline_request_rejects_an_unknown_command():
     assert parsed is None
     assert host == "gofile"
     assert "Usage:" in error
+
+
+def test_inline_result_attaches_the_placeholder_keyboard():
+    result = bot._inline_result(
+        "gofile",
+        "Mirror to Gofile",
+        "https://example.com/file.bin",
+        "Preparing",
+        bot._inline_pending_keyboard(),
+    )
+
+    button = result.reply_markup.inline_keyboard[0][0]
+    assert button.callback_data == "inline:pending"

@@ -11,6 +11,17 @@ export function cancelKeyboard(jobId: string): InlineKeyboard {
   };
 }
 
+/**
+ * Telegram only returns inline_message_id for chosen inline results whose
+ * message has an inline keyboard. Attach this placeholder so the Worker can
+ * edit the card; it is replaced with the real Cancel button immediately.
+ */
+export function pendingKeyboard(): InlineKeyboard {
+  return {
+    inline_keyboard: [[{ text: "⏳ Starting…", callback_data: "inline:pending" }]],
+  };
+}
+
 export function emptyKeyboard(): InlineKeyboard {
   return { inline_keyboard: [] };
 }

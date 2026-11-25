@@ -591,9 +591,16 @@ describe("inline mode", () => {
     const result = tg.inlineAnswers[0].results[0] as {
       title: string;
       input_message_content: { message_text: string };
+      reply_markup: {
+        inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+      };
     };
     expect(result.title).toBe("Mirror to Gofile");
     expect(result.input_message_content.message_text).toContain("boot, vendor");
+    expect(result.reply_markup.inline_keyboard[0][0]).toMatchObject({
+      text: "⏳ Starting…",
+      callback_data: "inline:pending",
+    });
   });
 
   it("dispatches a chosen inline result with inline_message_id", async () => {
@@ -629,8 +636,27 @@ describe("inline mode", () => {
     });
 
     expect(gh.dispatched).toHaveLength(0);
-    const result = tg.inlineAnswers[0].results[0] as { title: string };
+    const result = tg.inlineAnswers[0].results[0] as {
+      title: string;
+      reply_markup?: unknown;
+    };
     expect(result.title).toBe("This bot is private");
+    expect(result.reply_markup).toBeUndefined();
+  });
+
+  it("answers the placeholder button while a job is starting", async () => {
+    const { deps, tg } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 8,
+      callback_query: {
+        id: "cb-pending",
+        from: user,
+        inline_message_id: "inline-1",
+        data: "inline:pending",
+      },
+    });
+
+    expect(tg.answers.at(-1)?.text).toContain("still starting");
   });
 
   it("ignores a chosen result without inline_message_id", async () => {
