@@ -443,7 +443,7 @@ In groups, use commands such as `/gf@YourBot <link>`. Plain links are ignored th
 
 Type `@YourBot /gf <link>` in any chat, including a private chat with someone else, and pick the result. The bot posts the card in that chat and keeps editing it with live progress and the final link, so the result is visible to everyone there without opening a separate chat with the bot. `/px <link>` and `-dump boot,vendor` work the same way.
 
-Inline mode is authorized by the Telegram account that types the query, not by the target chat, because Telegram does not reveal the target chat to the bot. Only `ALLOWED_USER_IDS` can use it. Inline cards cannot be deleted by bots, so the completion card is edited in place instead of the delete-then-send used in normal chats. Reply-to-file is not available inline; send a direct link instead.
+Inline mode is authorized by the Telegram account that types the query, not by the target chat, because Telegram does not reveal the target chat to the bot. When `ALLOWED_USER_IDS` is set, only those users can use it. Inline cards cannot be deleted by bots, so the completion card is edited in place instead of the delete-then-send used in normal chats. Reply-to-file is not available inline; send a direct link instead.
 
 ### Android partition dumps (`-dump`)
 

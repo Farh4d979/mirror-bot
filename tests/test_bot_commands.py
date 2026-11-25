@@ -359,3 +359,52 @@ def test_gate_blocks_group_commands_before_handlers(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "_group_has_owner", no_owner)
     _dispatch(app, _build_update(ChatType.GROUP, user_id=99))
     assert not started
+
+
+def test_parse_inline_request_accepts_a_bare_link():
+    parsed, host, error = bot._parse_inline_request(
+        "https://example.com/file.bin"
+    )
+
+    assert error is None
+    assert host == "gofile"
+    assert parsed["source"] == "https://example.com/file.bin"
+    assert parsed["dump_partitions"] == ()
+
+
+def test_parse_inline_request_accepts_px_and_dump():
+    parsed, host, error = bot._parse_inline_request(
+        "/px@Mirror979Bot https://example.com/a.bin -dump boot,vendor"
+    )
+
+    assert error is None
+    assert host == "pixeldrain"
+    assert parsed["dump_partitions"] == ("boot", "vendor")
+
+
+def test_parse_inline_request_rejects_a_missing_link():
+    parsed, host, error = bot._parse_inline_request("/gf")
+
+    assert parsed is None
+    assert host == "gofile"
+    assert "Usage:" in error
+
+
+def test_parse_inline_request_rejects_an_empty_dump_list():
+    parsed, host, error = bot._parse_inline_request(
+        "/gf https://example.com/a.bin -dump"
+    )
+
+    assert parsed is None
+    assert host == "gofile"
+    assert "-dump boot,vendor" in error
+
+
+def test_parse_inline_request_rejects_an_unknown_command():
+    parsed, host, error = bot._parse_inline_request(
+        "/status https://example.com/a.bin"
+    )
+
+    assert parsed is None
+    assert host == "gofile"
+    assert "Usage:" in error
