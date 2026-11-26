@@ -241,7 +241,7 @@ describe("cron monitor", () => {
     expect(store.updates[0].patch.state).toBe("running");
     expect(store.removed).toHaveLength(0);
     expect(tg.edits).toHaveLength(1);
-    expect(tg.edits[0]).toContain("GitHub Actions");
+    expect(tg.edits[0]).toContain("preparing the job");
     expect(tg.edits[0]).toContain("abc12345");
   });
 

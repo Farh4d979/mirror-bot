@@ -51,16 +51,55 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
       - name: Install system tools
-        timeout-minutes: 6
+        timeout-minutes: 4
         run: |
-          APT_OPTS="-o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1 -o DPkg::Lock::Timeout=60"
-          timeout 90 sudo apt-get update -qq $APT_OPTS \
-            || echo "apt-get update did not finish; using the runner's package lists"
-          sudo apt-get install -y -qq $APT_OPTS aria2 ffmpeg megatools xz-utils 7zip 7zip-rar \
-            || sudo apt-get install -y -qq $APT_OPTS aria2 ffmpeg megatools xz-utils 7zip \
-            || sudo apt-get install -y -qq $APT_OPTS aria2 ffmpeg megatools xz-utils p7zip-full p7zip-rar
-          command -v 7z || command -v 7zz
+          APT_OPTS="-o Acquire::ForceIPv4=true -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 -o Acquire::Retries=0 -o DPkg::Lock::Timeout=15"
+          missing=""
+          if ! command -v 7z >/dev/null 2>&1 && ! command -v 7zz >/dev/null 2>&1; then
+            missing="$missing 7zip"
+          fi
+          SOURCE="$(python - <<'PY' 2>/dev/null || true
+          import json, os
+          from cryptography.fernet import Fernet
+          raw = os.environ.get("REMOTE_PAYLOAD", "")
+          if raw:
+              data = json.loads(Fernet(os.environ["REMOTE_JOB_KEY"].encode()).decrypt(raw.encode()))
+              print(data.get("source", ""))
+          PY
+          )"
+          NEED_FFMPEG=1
+          case "${SOURCE%%\?*}" in
+            *.zip|*.7z|*.rar|*.tar|*.gz|*.xz|*.bz2|*.img|*.bin|*.iso|*.apk|*.exe|*.msi|*.dmg|*.mp4|*.mkv|*.webm|*.mp3|*.flac|*.pdf|*.epub)
+              NEED_FFMPEG=0
+              ;;
+          esac
+          if [ "$NEED_FFMPEG" = 1 ] && ! command -v ffmpeg >/dev/null 2>&1; then
+            missing="$missing ffmpeg"
+          fi
+          case "$SOURCE" in
+            *mega.nz*|*mega.co.nz*|*mega.io*) missing="$missing megatools" ;;
+          esac
+          if [ -n "$missing" ]; then
+            # The runner image already ships 7-Zip, aria2 and xz. Keep any apt
+            # attempt short so a stalled mirror cannot block the mirror job.
+            timeout -k 5 25 sudo apt-get update -qq $APT_OPTS || true
+            timeout -k 5 60 sudo apt-get install -y -qq $APT_OPTS $missing \
+              || echo "::warning::apt could not install:$missing"
+          fi
+          if [ "$NEED_FFMPEG" = 1 ] && ! command -v ffmpeg >/dev/null 2>&1; then
+            # PyPI is a reliable fallback when the distro mirror is slow.
+            if timeout -k 5 90 python -m pip install -q --disable-pip-version-check --no-deps imageio-ffmpeg; then
+              FFMPEG_BIN="$(python -c 'import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())')"
+              sudo install -m 0755 "$FFMPEG_BIN" /usr/local/bin/ffmpeg
+            else
+              echo "::warning::ffmpeg is unavailable; yt-dlp will fall back to a single format."
+            fi
+          fi
+          command -v 7z || command -v 7zz || { echo "::error::7-Zip is required but was not found."; exit 1; }
 
       - name: Install payload-dumper-go
         run: |
@@ -72,9 +111,6 @@ jobs:
             -C /usr/local/bin payload-dumper-go
           sudo chmod +x /usr/local/bin/payload-dumper-go
           command -v payload-dumper-go
-
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
 
       - name: Show runner disk
         run: df -h /

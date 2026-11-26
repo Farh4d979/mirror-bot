@@ -2,7 +2,6 @@ import type { HandlerDeps } from "./handlers";
 import { deliverCancelled, deliverFailed, editJobCard } from "./handlers";
 import { RunNotFoundError } from "./github";
 import { cancelKeyboard, renderJob } from "./render";
-import { humanEta } from "./utils";
 
 const DISPATCH_STALE_SECONDS = 10 * 60;
 const RUN_MISSING_SECONDS = 12 * 60 * 60;
@@ -72,7 +71,7 @@ export async function refreshJobs(deps: HandlerDeps): Promise<void> {
       job.state === "cancelling"
         ? "Cancelling on GitHub Actions…"
         : info.status === "in_progress"
-          ? `GitHub Actions · ${humanEta(Math.max(0, now - job.startedAt))}`
+          ? "Runner started · preparing the job…"
           : "Waiting for a GitHub Actions runner…";
     const previousState = job.state;
     const nextState =
