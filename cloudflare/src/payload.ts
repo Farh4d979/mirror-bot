@@ -21,6 +21,7 @@ export function buildPayload(
     source_kind: job.sourceKind,
     host: job.host,
     dump_partitions: job.dumpPartitions,
+    compress: Boolean(job.compress),
     file_id: job.fileId ?? null,
     file_name: job.fileName ?? null,
     file_size: job.fileSize ?? null,

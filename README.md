@@ -29,6 +29,7 @@ Telegram link / replied file
 - Image galleries through gallery-dl (Pixiv, Danbooru, Gelbooru, Imgur albums, DeviantArt, Flickr, ArtStation, Tumblr, Reddit image posts, and many more).
 - Public MEGA file and folder links through megatools (`megadl`).
 - Android partition dumps: `/gf <link> -dump boot,vendor` downloads an OTA zip, fastboot ROM, or `.7z`/`.rar` archive, extracts only the requested images from `payload.bin` or `super.img`, and uploads each image separately.
+- Maximum compression: `/compress-gf <link>` and `/compress-px <link>` repack the download (or the requested `-dump` partitions) into one 7-Zip archive with LZMA2, report its SHA-256, and upload the archive.
 - Magnet links and `.torrent` files through aria2c (DHT enabled, seeding disabled).
 - Telegram attachments — documents, photos, video, audio, voice notes, animations and stickers — are mirrored only when you reply to them with `/gf` or `/px`. Unsolicited media is ignored. Telegram's cloud Bot API limits bot downloads to 20 MB per attachment.
 - Gofile share links (`gofile.io/d/...`) resolve through Gofile's API using a temporary guest token. Folder links are supported; the bot downloads the largest file or every file in `MULTI_FILE_MODE=zip`.
@@ -305,7 +306,7 @@ Actions busy indefinitely.
 
 ## Local setup
 
-Requirements: Python 3.10+ (3.12 recommended), [aria2](https://aria2.github.io/) and ffmpeg. Without aria2, direct HTTP downloads still work through Python, but torrents/magnets do not. MEGA links additionally need megatools (`megadl`, or the newer Windows `megatools.exe`). `-dump` extraction needs [payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases) and [7-Zip](https://www.7-zip.org/) for `.7z`/`.rar` ROMs; gallery-dl and yt-dlp are installed from `requirements.txt`.
+Requirements: Python 3.10+ (3.12 recommended), [aria2](https://aria2.github.io/) and ffmpeg. Without aria2, direct HTTP downloads still work through Python, but torrents/magnets do not. MEGA links additionally need megatools (`megadl`, or the newer Windows `megatools.exe`). `-dump` extraction needs [payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases) and [7-Zip](https://www.7-zip.org/) for `.7z`/`.rar` ROMs; `/compress-gf` and `/compress-px` also need 7-Zip. gallery-dl and yt-dlp are installed from `requirements.txt`.
 
 On Windows, the setup script installs aria2, ffmpeg, 7-Zip, megatools,
 payload-dumper-go, creates `.venv`, and installs the Python dependencies:
@@ -418,7 +419,7 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go, 7-Zip and galler
 | `STATE_FILE` | `.state/telegram.json` | Telegram offset state. The PC runner uses `.state/local-telegram.json`. |
 | `ARIA2C_PATH` | `aria2c` | Path to the aria2c binary |
 | `PAYLOAD_DUMPER_PATH` | `payload-dumper-go` | Path to payload-dumper-go, used by `-dump` |
-| `SEVEN_ZIP_PATH` | `7z` | Path to the 7-Zip executable, used by `-dump` for `.7z`/`.rar` archives |
+| `SEVEN_ZIP_PATH` | `7z` | Path to the 7-Zip executable, used by `-dump` for `.7z`/`.rar` archives and by `/compress-gf`/`/compress-px` |
 | `ALLOW_PRIVATE_URLS` | `0` | **Dangerous.** Allows localhost/private IP links. Keep off in production. |
 | `LOG_LEVEL` | `INFO` | Python log level |
 
@@ -429,6 +430,8 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go, 7-Zip and galler
 | `/start`, `/help` | Usage |
 | `/gf <link>` | Upload a link to Gofile, or reply to a file with `/gf` |
 | `/gf <link> -dump boot,vendor` | Extract only those Android partitions from `payload.bin` or `super.img` (ZIP, TAR, 7z or RAR), then upload each one |
+| `/compress-gf <link>` | Pack the download into a maximum-compression 7z, report its SHA-256, and upload it to Gofile |
+| `/compress-px <link>` | Same, but upload the 7z to Pixeldrain (requires `PIXELDRAIN_API_KEY`) |
 | `/mirror <link>` | Same as `/gf` |
 | `/px <link>` | Upload a link to Pixeldrain, or reply to a file with `/px` (requires `PIXELDRAIN_API_KEY`) |
 | `/status` | Active jobs |
@@ -442,7 +445,7 @@ In groups, use commands such as `/gf@YourBot <link>`. Plain links are ignored th
 
 ### Inline mode
 
-Type `@YourBot /gf <link>` in any chat, including a private chat with someone else, and pick the result. If inline feedback is enabled in BotFather the job starts automatically. Otherwise the posted card shows **▶️ Start mirroring**; tap it once to start. The bot posts the card in that chat and keeps editing it with live progress and the final link, so the result is visible to everyone there without opening a separate chat with the bot. `/px <link>` and `-dump boot,vendor` work the same way.
+Type `@YourBot /gf <link>` in any chat, including a private chat with someone else, and pick the result. If inline feedback is enabled in BotFather the job starts automatically. Otherwise the posted card shows **▶️ Start mirroring**; tap it once to start. The bot posts the card in that chat and keeps editing it with live progress and the final link, so the result is visible to everyone there without opening a separate chat with the bot. `/px <link>`, `/compress-gf <link>`, `/compress-px <link>` and `-dump boot,vendor` work the same way.
 
 Inline mode is authorized by the Telegram account that types the query, not by the target chat, because Telegram does not reveal the target chat to the bot. When `ALLOWED_USER_IDS` is set, only those users can use it. Inline cards cannot be deleted by bots, so the completion card is edited in place instead of the delete-then-send used in normal chats. Reply-to-file is not available inline; send a direct link instead.
 
@@ -465,6 +468,14 @@ If a logical partition exists in both slots, `-dump vendor` picks `vendor_a` (sl
 `-dump` works with both `/gf` and `/px`, and with a file you reply to.
 
 Extraction needs free disk space for the requested images, not for the whole `super.img`, but the downloaded ROM is kept until the job finishes. payload-dumper-go and 7-Zip are installed by the GitHub Actions workflow, the Docker image (7-Zip only), and `scripts\setup-windows.ps1`. For a manual local run, install [7-Zip](https://www.7-zip.org/) so `7z`/`7zz` is on `PATH` (or set `SEVEN_ZIP_PATH`), download payload-dumper-go from [ssut/payload-dumper-go](https://github.com/ssut/payload-dumper-go/releases) and put it on `PATH` (or set `PAYLOAD_DUMPER_PATH`), and install `xz` if your payloads need it.
+
+### Maximum compression (`/compress-gf`, `/compress-px`)
+
+`/compress-gf <link>` and `/compress-px <link>` download the file, pack it with 7-Zip at maximum compression (`-mx=9`, LZMA2, solid), print the archive's SHA-256, and upload the `.7z` to Gofile or Pixeldrain. The final card lists the archive name, size, SHA-256, and download link. Reply to an attachment with `/compress-gf` or `/compress-px` to compress a Telegram file.
+
+Add `-dump` to compress the extracted partitions instead of the original download. The requested images are packed into one archive named after the source and partitions, for example `ota-boot-vendor.7z`; the images are not uploaded separately.
+
+Compression needs [7-Zip](https://www.7-zip.org/) just like `-dump`. It runs in the shared job pipeline, so the PC fallback, GitHub Actions workers, and Docker image behave the same. The archive is created next to the download and is removed with the job's temporary directory. Password protection is not supported.
 
 ## Supported links
 

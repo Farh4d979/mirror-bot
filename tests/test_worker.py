@@ -44,6 +44,7 @@ def test_job_from_payload_rebuilds_a_telegram_job():
         file_name="../../ota.zip",
         file_size=1234,
         dump_partitions=["boot", "vendor"],
+        compress=True,
         user_name="<script>",
     )
 
@@ -59,6 +60,7 @@ def test_job_from_payload_rebuilds_a_telegram_job():
     assert "/" not in job.file_name
     assert job.file_size == 1234
     assert job.dump_partitions == normalize_partitions(["boot", "vendor"])
+    assert job.compress is True
     assert job.status == "running"
     assert job.stage == "resolving"
 
@@ -85,6 +87,12 @@ def test_job_from_payload_rejects_bad_versions_and_fields():
     with pytest.raises(remote.RemoteJobError, match="dump partitions"):
         worker.job_from_payload(
             base_payload(dump_partitions="boot"),
+            make_settings(),
+        )
+
+    with pytest.raises(remote.RemoteJobError, match="compression flag"):
+        worker.job_from_payload(
+            base_payload(compress="yes"),
             make_settings(),
         )
 

@@ -45,3 +45,7 @@ class FileTooLarge(MirrorError):
 
 class DumpError(MirrorError):
     """An Android partition could not be found or extracted."""
+
+
+class CompressionError(MirrorError):
+    """A 7-Zip archive could not be created."""

@@ -124,6 +124,9 @@ def run_command(
     monkeypatch.setattr(bot, "_start_job", fake_start)
     if command == "px":
         asyncio.run(bot.cmd_px(update, context))
+    elif command in {"compress-gf", "compress-px"}:
+        update.effective_message.text = f"/{command} " + " ".join(args)
+        asyncio.run(bot.cmd_compress(update, context))
     else:
         asyncio.run(bot._cmd_link(update, context, command=command))
     return update, started
@@ -210,6 +213,48 @@ def test_px_requires_api_key(monkeypatch):
     assert not started
     assert update.effective_message.replies
     assert "PIXELDRAIN_API_KEY" in update.effective_message.replies[0]
+
+
+def test_compress_gf_starts_a_compressed_gofile_job(monkeypatch):
+    update, started = run_command(
+        monkeypatch, "compress-gf", ["https://example.com/file.zip"]
+    )
+    assert len(started) == 1
+    assert started[0].host == "gofile"
+    assert started[0].compress is True
+    assert not update.effective_message.replies
+
+
+def test_compress_px_starts_a_compressed_pixeldrain_job(monkeypatch):
+    update, started = run_command(
+        monkeypatch,
+        "compress-px",
+        ["https://example.com/file.zip"],
+        pixeldrain_api_key="secret",
+    )
+    assert len(started) == 1
+    assert started[0].host == "pixeldrain"
+    assert started[0].compress is True
+    assert not update.effective_message.replies
+
+
+def test_compress_dump_passes_partitions(monkeypatch):
+    update, started = run_command(
+        monkeypatch,
+        "compress-gf",
+        ["https://example.com/ota.zip", "-dump", "boot,vendor"],
+    )
+    assert len(started) == 1
+    assert started[0].compress is True
+    assert started[0].dump_partitions == ("boot", "vendor")
+    assert not update.effective_message.replies
+
+
+def test_bare_compress_command_shows_usage(monkeypatch):
+    update, started = run_command(monkeypatch, "compress-gf", [])
+    assert not started
+    assert update.effective_message.replies
+    assert "/compress-gf" in update.effective_message.replies[0]
 
 
 def test_owner_can_use_private_chat(monkeypatch):
@@ -416,6 +461,26 @@ def test_parse_inline_request_accepts_px_and_dump():
     assert error is None
     assert host == "pixeldrain"
     assert parsed["dump_partitions"] == ("boot", "vendor")
+    assert parsed["compress"] is False
+
+
+def test_parse_inline_request_accepts_compress_commands():
+    parsed, host, error = bot._parse_inline_request(
+        "/compress-gf@Mirror979Bot https://example.com/ota.zip -dump boot,vendor"
+    )
+
+    assert error is None
+    assert host == "gofile"
+    assert parsed["compress"] is True
+    assert parsed["dump_partitions"] == ("boot", "vendor")
+
+    parsed, host, error = bot._parse_inline_request(
+        "/compress-px https://example.com/a.bin"
+    )
+
+    assert error is None
+    assert host == "pixeldrain"
+    assert parsed["compress"] is True
 
 
 def test_parse_inline_request_rejects_a_missing_link():
@@ -485,6 +550,30 @@ def test_inline_query_stores_a_pending_start_request(tmp_path):
     assert pending[token]["source"] == "https://example.com/ota.zip"
     assert pending[token]["host"] == "pixeldrain"
     assert pending[token]["dump_partitions"] == ["boot", "vendor"]
+    assert pending[token]["compress"] is False
+
+
+def test_inline_query_stores_the_compress_flag(tmp_path):
+    settings = Settings(
+        telegram_token="token",
+        allowed_user_ids=frozenset({1}),
+        state_file=tmp_path / "telegram.json",
+    )
+    update = FakeUpdate(user_id=1)
+    update.inline_query = FakeInlineQuery(
+        "/compress-gf https://example.com/ota.zip -dump boot"
+    )
+    context = FakeContext(settings, [])
+
+    asyncio.run(bot.on_inline_query(update, context))
+
+    results, _kwargs = update.inline_query.answers[0]
+    assert "7-Zip" in results[0].input_message_content.message_text
+    button = results[0].reply_markup.inline_keyboard[0][0]
+    token = button.callback_data.removeprefix("inline:start:")
+    pending = bot._read_inline_pending(settings)
+    assert pending[token]["compress"] is True
+    assert pending[token]["dump_partitions"] == ["boot"]
 
 
 def _inline_pending_entry(**overrides):
@@ -549,6 +638,19 @@ def test_inline_start_button_starts_the_job(monkeypatch, tmp_path):
     assert job.dump_partitions == ("boot",)
     assert query.answers[-1][0] == "Starting…"
     assert token not in bot._read_inline_pending(settings)
+
+
+def test_inline_start_button_restores_the_compress_flag(monkeypatch, tmp_path):
+    token = "start-token"
+    started, _query, _bot_instance, _settings = _run_inline_start(
+        monkeypatch,
+        tmp_path,
+        token=token,
+        entry=_inline_pending_entry(compress=True),
+    )
+
+    assert len(started) == 1
+    assert started[0].compress is True
 
 
 def test_inline_start_button_is_launcher_only(monkeypatch, tmp_path):

@@ -17,6 +17,8 @@ export interface JobRecord {
   sourceKind: SourceKind;
   host: Host;
   dumpPartitions: string[];
+  /** Pack the result into a maximum-compression 7z archive. */
+  compress: boolean;
   fileId?: string | null;
   fileName?: string | null;
   fileSize?: number | null;
@@ -53,6 +55,7 @@ export interface PendingInline {
   source: string;
   host: Host;
   dumpPartitions: string[];
+  compress?: boolean;
   createdAt: number;
 }
 

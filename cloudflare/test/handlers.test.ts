@@ -363,6 +363,39 @@ describe("Telegram link jobs", () => {
     expect((await payloadOf(gh)).dump_partitions).toEqual(["boot", "vendor"]);
   });
 
+  it("routes /compress-gf and /compress-px to compressed jobs", async () => {
+    const { deps, gh } = makeDeps();
+    await handleUpdate(
+      deps,
+      update(
+        message({
+          text: "/compress-gf https://example.com/ota.zip -dump boot,vendor",
+        }),
+      ),
+    );
+    await handleUpdate(
+      deps,
+      update(
+        message({
+          message_id: 2,
+          text: "/compress-px https://example.com/a.bin",
+        }),
+        2,
+      ),
+    );
+
+    expect(await payloadOf(gh, 0)).toMatchObject({
+      host: "gofile",
+      dump_partitions: ["boot", "vendor"],
+      compress: true,
+    });
+    expect(await payloadOf(gh, 1)).toMatchObject({
+      host: "pixeldrain",
+      dump_partitions: [],
+      compress: true,
+    });
+  });
+
   it("rejects unsafe partition names without dispatching", async () => {
     const { deps, tg, gh } = makeDeps();
     await handleUpdate(
@@ -654,6 +687,64 @@ describe("inline mode", () => {
     expect(store.jobs.get(gh.dispatched[0].jobId)?.inlineMessageId).toBe(
       "inline-1",
     );
+  });
+
+  it("stores and dispatches the inline compress flag", async () => {
+    const { deps, store, tg, gh } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 31,
+      inline_query: inlineQuery({
+        query: "/compress-gf https://example.com/ota.zip -dump boot",
+      }),
+    });
+
+    const result = tg.inlineAnswers[0].results[0] as {
+      title: string;
+      input_message_content: { message_text: string };
+    };
+    expect(result.title).toBe("Compress to Gofile");
+    expect(result.input_message_content.message_text).toContain("7-Zip");
+    expect(store.pending.get("tok00001")).toMatchObject({
+      compress: true,
+      dumpPartitions: ["boot"],
+    });
+
+    await handleUpdate(deps, {
+      update_id: 32,
+      chosen_inline_result: chosenInline({
+        query: "/compress-gf https://example.com/ota.zip -dump boot",
+      }),
+    });
+    expect(await payloadOf(gh)).toMatchObject({
+      host: "gofile",
+      dump_partitions: ["boot"],
+      compress: true,
+    });
+  });
+
+  it("restores the compress flag from the inline Start button", async () => {
+    const { deps, gh } = makeDeps();
+    await handleUpdate(deps, {
+      update_id: 33,
+      inline_query: inlineQuery({
+        query: "/compress-px https://example.com/a.bin",
+      }),
+    });
+    await handleUpdate(deps, {
+      update_id: 34,
+      callback_query: {
+        id: "cb-compress",
+        from: user,
+        inline_message_id: "inline-1",
+        data: "inline:start:tok00001",
+      },
+    });
+
+    expect(gh.dispatched).toHaveLength(1);
+    expect(await payloadOf(gh)).toMatchObject({
+      host: "pixeldrain",
+      compress: true,
+    });
   });
 
   it("denies inline queries from other users", async () => {

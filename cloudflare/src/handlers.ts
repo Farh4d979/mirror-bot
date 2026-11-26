@@ -265,7 +265,7 @@ async function handleMessage(
 
   const text = String(message.text || "");
   if (text.startsWith("/")) {
-    const match = /^\/([A-Za-z0-9_]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/.exec(
+    const match = /^\/([A-Za-z0-9_-]+)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/.exec(
       text,
     );
     if (!match) return;
@@ -307,6 +307,32 @@ async function handleMessage(
       );
       return;
     }
+    if (command === "compress") {
+      await reply(
+        deps,
+        message,
+        "Usage: <code>/compress-gf &lt;link&gt; [-dump boot,vendor]</code>\n"
+          + "<code>/compress-px &lt;link&gt; [-dump boot,vendor]</code>",
+      );
+      return;
+    }
+    if (
+      command === "compress-gf" ||
+      command === "compress_gf" ||
+      command === "compress-px" ||
+      command === "compress_px"
+    ) {
+      await handleLinkCommand(
+        deps,
+        message,
+        command,
+        command.endsWith("px") ? "pixeldrain" : "gofile",
+        args,
+        updateId,
+        true,
+      );
+      return;
+    }
     return;
   }
 
@@ -325,6 +351,7 @@ async function handleMessage(
       sourceKind: "url",
       host: "gofile",
       dumpPartitions: [],
+      compress: false,
     });
     return;
   }
@@ -344,6 +371,7 @@ type InlineParse =
       host: InlineHost;
       source: string;
       dumpPartitions: string[];
+      compress: boolean;
     }
   | {
       ok: false;
@@ -357,16 +385,26 @@ function parseInlineQuery(text: string): InlineParse {
   const tokens = String(text || "").trim().split(/\s+/).filter(Boolean);
   let command = "gf";
   let host: InlineHost = "gofile";
+  let compress = false;
   let args = tokens;
 
   if (tokens.length > 0 && tokens[0].startsWith("/")) {
-    const match = /^\/([A-Za-z0-9_]+)(?:@[A-Za-z0-9_]+)?$/.exec(tokens[0]);
+    const match = /^\/([A-Za-z0-9_-]+)(?:@[A-Za-z0-9_]+)?$/.exec(tokens[0]);
     if (!match) return { ok: false, reason: "usage", host };
     command = match[1].toLowerCase();
-    if (command !== "gf" && command !== "mirror" && command !== "px") {
+    if (
+      command !== "gf" &&
+      command !== "mirror" &&
+      command !== "px" &&
+      command !== "compress-gf" &&
+      command !== "compress_gf" &&
+      command !== "compress-px" &&
+      command !== "compress_px"
+    ) {
       return { ok: false, reason: "usage", host };
     }
-    host = command === "px" ? "pixeldrain" : "gofile";
+    compress = command.startsWith("compress");
+    host = command.endsWith("px") ? "pixeldrain" : "gofile";
     args = tokens.slice(1);
   }
 
@@ -398,7 +436,7 @@ function parseInlineQuery(text: string): InlineParse {
   if (requested && dumpPartitions.length === 0) {
     return { ok: false, reason: "dump_usage", host };
   }
-  return { ok: true, command, host, source, dumpPartitions };
+  return { ok: true, command, host, source, dumpPartitions, compress };
 }
 
 function inlineResult(
@@ -478,13 +516,25 @@ async function handleInlineQuery(
       user_id: from.id,
       host: parsed.host,
       dump_partitions: parsed.dumpPartitions.length,
+      compress: parsed.compress,
     }),
   );
-  const title =
-    parsed.host === "pixeldrain" ? "Mirror to Pixeldrain" : "Mirror to Gofile";
-  const description = parsed.dumpPartitions.length
-    ? `${parsed.source} · dump ${parsed.dumpPartitions.join(", ")}`
-    : parsed.source;
+  const title = parsed.compress
+    ? parsed.host === "pixeldrain"
+      ? "Compress to Pixeldrain"
+      : "Compress to Gofile"
+    : parsed.host === "pixeldrain"
+      ? "Mirror to Pixeldrain"
+      : "Mirror to Gofile";
+  const description = [
+    parsed.source,
+    parsed.dumpPartitions.length
+      ? `dump ${parsed.dumpPartitions.join(", ")}`
+      : "",
+    parsed.compress ? "7z" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const token = deps.newToken ? deps.newToken() : randomToken();
   try {
     await deps.store.putPending(token, {
@@ -492,6 +542,7 @@ async function handleInlineQuery(
       source: parsed.source,
       host: parsed.host,
       dumpPartitions: parsed.dumpPartitions,
+      compress: parsed.compress,
       createdAt: nowSeconds(deps),
     });
   } catch (error) {
@@ -524,7 +575,11 @@ async function handleInlineQuery(
         parsed.host,
         title,
         description,
-        renderInlinePending(parsed.host, parsed.dumpPartitions),
+        renderInlinePending(
+          parsed.host,
+          parsed.dumpPartitions,
+          parsed.compress,
+        ),
         pendingKeyboard(token),
       ),
     ],
@@ -592,6 +647,7 @@ async function handleChosenInlineResult(
     source: parsed.source,
     host: parsed.host,
     dumpPartitions: parsed.dumpPartitions,
+    compress: parsed.compress,
     inlineMessageId,
   });
 }
@@ -604,6 +660,7 @@ async function submitInlineJob(
     source: string;
     host: InlineHost;
     dumpPartitions: string[];
+    compress: boolean;
     inlineMessageId: string;
   },
 ): Promise<void> {
@@ -621,6 +678,7 @@ async function submitInlineJob(
     sourceKind: "url",
     host: options.host,
     dumpPartitions: options.dumpPartitions,
+    compress: options.compress,
     fileId: null,
     fileName: null,
     fileSize: null,
@@ -680,6 +738,7 @@ async function submitInlineJob(
       user_id: job.userId,
       host: job.host,
       dump_partitions: job.dumpPartitions.length,
+      compress: job.compress,
     }),
   );
 
@@ -712,6 +771,7 @@ async function handleLinkCommand(  deps: HandlerDeps,
   host: "gofile" | "pixeldrain",
   args: string[],
   updateId: number,
+  compress = false,
 ): Promise<void> {
   let source: string | null = null;
   let sourceIndex = -1;
@@ -751,6 +811,7 @@ async function handleLinkCommand(  deps: HandlerDeps,
         attachment,
         host,
         dumpPartitions,
+        compress,
       });
       return;
     }
@@ -770,6 +831,7 @@ async function handleLinkCommand(  deps: HandlerDeps,
     sourceKind: "url",
     host,
     dumpPartitions,
+    compress,
   });
 }
 
@@ -782,9 +844,11 @@ async function mirrorAttachment(
     attachment: TgFile;
     host: "gofile" | "pixeldrain";
     dumpPartitions: string[];
+    compress: boolean;
   },
 ): Promise<void> {
-  const { message, replied, attachment, host, dumpPartitions, updateId } = options;
+  const { message, replied, attachment, host, dumpPartitions, compress, updateId } =
+    options;
   const document = replied.document;
 
   if (document) {
@@ -819,6 +883,7 @@ async function mirrorAttachment(
         fileSize: document.file_size || null,
         host,
         dumpPartitions,
+        compress,
       });
       return;
     }
@@ -859,6 +924,7 @@ async function mirrorAttachment(
     fileSize: size,
     host,
     dumpPartitions,
+    compress,
   });
 }
 
@@ -875,9 +941,10 @@ async function submitJob(
     fileSize?: number | null;
     host: "gofile" | "pixeldrain";
     dumpPartitions: string[];
+    compress: boolean;
   },
 ): Promise<void> {
-  const { message, from, host, dumpPartitions, updateId } = options;
+  const { message, from, host, dumpPartitions, compress, updateId } = options;
   const now = nowSeconds(deps);
   const draft: NewJob = {
     id: deps.newId ? deps.newId() : randomJobId(),
@@ -890,6 +957,7 @@ async function submitJob(
     sourceKind: options.sourceKind,
     host,
     dumpPartitions,
+    compress,
     fileId: options.fileId ?? null,
     fileName: options.fileName ?? null,
     fileSize: options.fileSize ?? null,
@@ -928,6 +996,7 @@ async function submitJob(
       host: job.host,
       source_kind: job.sourceKind,
       dump_partitions: job.dumpPartitions.length,
+      compress: job.compress,
     }),
   );
 
@@ -1301,6 +1370,7 @@ async function handleInlineStart(
       user_id: from.id,
       host: pending.host,
       dump_partitions: pending.dumpPartitions.length,
+      compress: Boolean(pending.compress),
     }),
   );
   await deps.tg.answerCallbackQuery(query.id, "Starting…");
@@ -1310,6 +1380,7 @@ async function handleInlineStart(
     source: pending.source,
     host: pending.host,
     dumpPartitions: pending.dumpPartitions,
+    compress: Boolean(pending.compress),
     inlineMessageId,
   });
 }

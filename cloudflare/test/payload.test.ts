@@ -32,6 +32,7 @@ const job: JobRecord = {
   sourceKind: "url",
   host: "gofile",
   dumpPartitions: ["boot", "vendor"],
+  compress: false,
   runId: 123,
   runUrl: "https://github.com/owner/repo/actions/runs/123",
   createdAt: 100,
@@ -54,6 +55,7 @@ describe("GitHub Actions payload", () => {
       source_kind: "url",
       host: "gofile",
       dump_partitions: ["boot", "vendor"],
+      compress: false,
       file_id: null,
       file_name: null,
       file_size: null,
@@ -84,5 +86,10 @@ describe("GitHub Actions payload", () => {
     expect(payload.file_id).toBe("file-1");
     expect(payload.file_name).toBe("animation_u1.mp4");
     expect(payload.file_size).toBe(1234);
+  });
+
+  it("marks compressed jobs for the Python worker", () => {
+    const payload = buildPayload({ ...job, compress: true }, config);
+    expect(payload.compress).toBe(true);
   });
 });

@@ -76,6 +76,100 @@ def test_render_done_job():
     assert "Farhad" in text
 
 
+def test_render_compressed_job_reports_the_archive_and_sha256():
+    job = new_job(
+        user_id=1,
+        chat_id=2,
+        source="https://example.com/a.zip",
+        host="gofile",
+        user_name="Farhad",
+        compress=True,
+    )
+    job.update(
+        status="done",
+        stage="done",
+        percent=100.0,
+        file_name="a.7z",
+        file_size=1234,
+        archive_sha256="a" * 64,
+        started_at=100.0,
+        finished_at=130.0,
+        result=UploadResult(
+            url="https://gofile.io/d/archive",
+            host="Gofile",
+            file_name="a.7z",
+            size=1234,
+        ),
+    )
+    text = render_final(job)
+    assert "Compressed & uploaded" in text
+    assert "a.7z" in text
+    assert "maximum compression" in text
+    assert "SHA-256" in text
+    assert "a" * 64 in text
+    assert "https://gofile.io/d/archive" in text
+
+
+def test_render_compressed_dump_job_reports_one_archive_and_sha256():
+    job = new_job(
+        user_id=1,
+        chat_id=2,
+        source="https://example.com/ota.zip",
+        host="gofile",
+        user_name="Farhad",
+        dump_partitions=("boot", "vendor"),
+        compress=True,
+    )
+    result = UploadResult(
+        url="https://gofile.io/d/partitions",
+        host="Gofile",
+        file_name="ota-boot-vendor.7z",
+        size=4096,
+    )
+    job.update(
+        status="done",
+        stage="done",
+        percent=100.0,
+        results=(result,),
+        result=result,
+        missing_partitions=("system",),
+        file_name="ota-boot-vendor.7z",
+        file_size=4096,
+        archive_sha256="b" * 64,
+        started_at=100.0,
+        finished_at=130.0,
+    )
+    text = render_final(job)
+    assert "Partition dump complete" in text
+    assert "7-Zip archive" in text
+    assert "ota-boot-vendor.7z" in text
+    assert "SHA-256" in text
+    assert "b" * 64 in text
+    assert "Not found" in text
+    assert "https://gofile.io/d/partitions" in text
+
+
+def test_render_compressing_stage():
+    job = new_job(
+        user_id=1,
+        chat_id=2,
+        source="https://example.com/ota.zip",
+        host="gofile",
+        compress=True,
+    )
+    job.update(
+        status="running",
+        stage="compressing",
+        percent=42.0,
+        detail="Compressing with 7-Zip · 42%",
+    )
+    text = render_job(job)
+    assert "🗜️" in text
+    assert "Compressing" in text
+    assert "42%" in text
+    assert "7z" in text
+
+
 def test_render_dump_job_lists_each_partition_and_missing():
     job = new_job(
         user_id=1,

@@ -471,6 +471,11 @@ def _archive_kind(path: Path) -> Optional[str]:
     return None
 
 
+def find_7zip(settings: Settings) -> Optional[str]:
+    """Return the 7-Zip executable, if one can be found."""
+    return _find_7zip(settings)
+
+
 def _find_7zip(settings: Settings) -> Optional[str]:
     configured = (settings.seven_zip_path or "7z").strip()
     candidates = [configured, "7z", "7zz", "7za"]

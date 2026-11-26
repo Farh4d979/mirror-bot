@@ -6,6 +6,7 @@ import {
   renderCancelled,
   renderDenied,
   renderFailed,
+  renderInlinePending,
   renderJob,
   renderStart,
   renderStatus,
@@ -23,6 +24,7 @@ function job(overrides: Partial<JobRecord> = {}): JobRecord {
     sourceKind: "url",
     host: "gofile",
     dumpPartitions: [],
+    compress: false,
     runId: 123,
     runUrl: "https://github.com/owner/repo/actions/runs/123",
     createdAt: 100,
@@ -73,10 +75,24 @@ describe("job cards", () => {
     expect(renderStatus([])).toBe("No active jobs.");
   });
 
+  it("marks a compressed job in the progress card", () => {
+    const text = renderJob(job({ compress: true }), 130);
+    expect(text).toContain("7-Zip · maximum compression");
+    expect(text).toContain("🗜 7z");
+  });
+
+  it("marks a compressed inline pending card", () => {
+    const text = renderInlinePending("gofile", ["boot"], true);
+    expect(text).toContain("7-Zip · maximum compression");
+    expect(text).toContain("boot");
+  });
+
   it("keeps the start text free of the PC-only handoff command", () => {
     const text = renderStart();
     expect(text).toContain("/gf");
     expect(text).toContain("/px");
+    expect(text).toContain("/compress-gf");
+    expect(text).toContain("/compress-px");
     expect(text).toContain("-dump boot,vendor");
     expect(text).not.toContain("/handoff");
     expect(text).toContain("Cloudflare Worker");

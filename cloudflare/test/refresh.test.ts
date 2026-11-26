@@ -16,6 +16,7 @@ function job(overrides: Partial<JobRecord> = {}): JobRecord {
     sourceKind: "url",
     host: "gofile",
     dumpPartitions: [],
+    compress: false,
     runId: 123,
     runUrl: "https://github.com/owner/repo/actions/runs/123",
     createdAt: 1000,

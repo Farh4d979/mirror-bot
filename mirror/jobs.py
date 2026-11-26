@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from .config import Settings
+from .compressor import build_archive_name, compress_to_7z
 from .downloader import Downloader
 from .dumper import extract_partitions
 from .errors import (
@@ -55,6 +56,8 @@ class Job:
     extras: int = 0
     dump_partitions: tuple[str, ...] = ()
     missing_partitions: tuple[str, ...] = ()
+    compress: bool = False
+    archive_sha256: Optional[str] = None
     results: tuple[UploadResult, ...] = ()
     result: Optional[UploadResult] = None
     error: Optional[str] = None
@@ -88,6 +91,8 @@ class Job:
                 "extras": self.extras,
                 "dump_partitions": self.dump_partitions,
                 "missing_partitions": self.missing_partitions,
+                "compress": self.compress,
+                "archive_sha256": self.archive_sha256,
                 "results": self.results,
                 "result": self.result,
                 "error": self.error,
@@ -290,6 +295,39 @@ class JobManager:
             if not usable:
                 raise UploaderUnavailable(reason)
 
+            if job.compress:
+                job.update(
+                    stage="compressing",
+                    percent=0.0,
+                    detail="Creating a maximum-compression 7-Zip archive…",
+                )
+                archive_path = workdir / build_archive_name(
+                    file_path.name,
+                    partitions=job.dump_partitions if dump_requested else (),
+                )
+                compressed = compress_to_7z(
+                    upload_files,
+                    archive_path,
+                    settings=self.settings,
+                    progress=lambda percent, detail: job.update(
+                        stage="compressing", percent=percent, detail=detail
+                    ),
+                    cancel=job.cancel,
+                )
+                if exceeds_limit(compressed.size, self.settings.max_file_size):
+                    raise FileTooLarge(
+                        f"The archive is {human_size(compressed.size)}, above the "
+                        f"{human_size(self.settings.max_file_size)} limit."
+                    )
+                upload_files = [compressed.path]
+                total_size = compressed.size
+                job.update(
+                    file_name=compressed.path.name,
+                    file_size=compressed.size,
+                    extras=0,
+                    archive_sha256=compressed.sha256,
+                )
+
             job.update(
                 stage="uploading",
                 percent=0.0,
@@ -370,6 +408,7 @@ def new_job(
     telegram_file_id: Optional[str] = None,
     inline_message_id: Optional[str] = None,
     dump_partitions: Sequence[str] = (),
+    compress: bool = False,
 ) -> Job:
     return Job(
         id=secrets.token_hex(4),
@@ -383,4 +422,5 @@ def new_job(
         telegram_file_id=telegram_file_id,
         inline_message_id=inline_message_id,
         dump_partitions=tuple(dump_partitions),
+        compress=compress,
     )

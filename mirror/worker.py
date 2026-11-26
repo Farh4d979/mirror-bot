@@ -131,6 +131,10 @@ def job_from_payload(
     if file_size is not None and file_size < 0:
         file_size = None
 
+    raw_compress = payload.get("compress", False)
+    if not isinstance(raw_compress, bool):
+        raise RemoteJobError("The job payload has an invalid compression flag.")
+
     now = time.time()
     job = Job(
         id=job_id,
@@ -148,6 +152,7 @@ def job_from_payload(
         file_name=file_name,
         file_size=file_size,
         dump_partitions=dump_partitions,
+        compress=raw_compress,
         created_at=now,
         started_at=now,
     )
@@ -392,11 +397,12 @@ def main() -> int:
         return 2
 
     logger.info(
-        "Worker starting job %s (%s, host=%s, dump=%s, inline=%s)",
+        "Worker starting job %s (%s, host=%s, dump=%s, compress=%s, inline=%s)",
         job.id,
         job.source_kind,
         job.host,
         ",".join(job.dump_partitions) or "no",
+        "yes" if job.compress else "no",
         "yes" if job.inline_message_id else "no",
     )
     try:

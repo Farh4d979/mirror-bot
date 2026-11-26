@@ -80,6 +80,7 @@ def test_build_payload_carries_the_worker_settings(tmp_path):
         source_kind="telegram_file",
         telegram_file_id="file-id",
         dump_partitions=("boot", "vendor"),
+        compress=True,
     )
     job.update(file_name="ota.zip", file_size=456)
 
@@ -92,6 +93,7 @@ def test_build_payload_carries_the_worker_settings(tmp_path):
     assert payload["file_name"] == "ota.zip"
     assert payload["file_size"] == 456
     assert payload["dump_partitions"] == ["boot", "vendor"]
+    assert payload["compress"] is True
     assert payload["settings"] == {
         "max_file_size": 12345,
         "job_timeout": 900,
@@ -174,6 +176,7 @@ def test_dispatch_encrypts_the_payload_and_tracks_the_run(tmp_path):
             "source_kind": "telegram_file",
             "host": "gofile",
             "dump_partitions": [],
+            "compress": False,
             "message_id": 99,
             "inline_message_id": "",
             "run_id": 4242,

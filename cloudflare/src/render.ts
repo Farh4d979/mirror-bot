@@ -54,10 +54,12 @@ function stateDetail(job: JobRecord): string {
 export function renderJob(job: JobRecord, now = Math.floor(Date.now() / 1000)): string {
   const lines = [`☁️ <b>GitHub Actions</b> · <code>${job.id}</code>`];
   lines.push(`<i>${htmlEscape(stateDetail(job))}</i>`);
+  if (job.compress) lines.push("🗜 <i>7-Zip · maximum compression</i>");
   lines.push(launcherHtml(job));
 
   const footer = [`📦 ${job.host === "pixeldrain" ? "Pixeldrain" : "Gofile"}`];
   if (job.fileSize) footer.push(`💾 ${humanSize(job.fileSize)}`);
+  if (job.compress) footer.push("🗜 7z");
   if (job.startedAt && now > job.startedAt) {
     footer.push(`⏱ ${humanEta(now - job.startedAt)}`);
   }
@@ -132,6 +134,9 @@ export function renderStart(botUsername = ""): string {
     + "/mirror &lt;link&gt; — same as /gf\n"
     + "/px &lt;link&gt; — upload to Pixeldrain, or reply to a file with /px "
     + "(requires a free Pixeldrain API key)\n"
+    + "/compress-gf &lt;link&gt; — download, pack into a maximum-compression "
+    + "7z archive, upload to Gofile, and report the archive SHA-256\n"
+    + "/compress-px &lt;link&gt; — same, but upload the 7z to Pixeldrain\n"
     + "/status — active jobs\n"
     + "/cancel — cancel your jobs\n"
     + "/id — show your Telegram ID\n\n"
@@ -139,7 +144,12 @@ export function renderStart(botUsername = ""): string {
     + "/gf &lt;link&gt; -dump boot,vendor — download an OTA zip, fastboot ROM, "
     + "or 7z/RAR archive, extract only those partition images from payload.bin "
     + "or super.img, and upload them. Use <code>-dump</code> with spaces too: "
-    + "<code>-dump boot vendor</code>."
+    + "<code>-dump boot vendor</code>.\n"
+    + "/compress-gf &lt;link&gt; -dump boot,vendor — extract those images, pack "
+    + "them into one maximum-compression 7z archive, upload it, and report its "
+    + "SHA-256. <code>/compress-px</code> does the same for Pixeldrain. "
+    + "Compression needs 7-Zip on the worker (set <code>SEVEN_ZIP_PATH</code> "
+    + "if it is not on PATH)."
   );
 }
 
@@ -160,12 +170,16 @@ export function renderDumpUsage(command: string): string {
 export function renderInlinePending(
   host: "gofile" | "pixeldrain",
   dumpPartitions: string[] = [],
+  compress = false,
 ): string {
   const lines = [
     "☁️ <b>GitHub Actions</b>",
     "<i>Preparing the mirror job…</i>",
     `📦 ${host === "pixeldrain" ? "Pixeldrain" : "Gofile"}`,
   ];
+  if (compress) {
+    lines.push("🗜 7-Zip · maximum compression");
+  }
   if (dumpPartitions.length > 0) {
     lines.push(`🧩 ${htmlEscape(dumpPartitions.join(", "))}`);
   }

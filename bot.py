@@ -200,17 +200,23 @@ def _job_for_inline_message(
 def _inline_usage_text() -> str:
     return (
         "Usage: <code>/gf &lt;link&gt; [-dump boot,vendor]</code>\n"
+        "Use <code>/compress-gf</code> or <code>/compress-px</code> to pack the "
+        "result into a maximum-compression 7z archive.\n"
         "Inline mode can only mirror a direct link. Reply-to-file is not "
         "available in inline mode."
     )
 
 
-def _inline_pending_text(host: str, dump_partitions: Sequence[str]) -> str:
+def _inline_pending_text(
+    host: str, dump_partitions: Sequence[str], compress: bool = False
+) -> str:
     lines = [
         "☁️ <b>GitHub Actions</b>",
         "<i>Preparing the mirror job…</i>",
         f"📦 {'Pixeldrain' if host == 'pixeldrain' else 'Gofile'}",
     ]
+    if compress:
+        lines.append("🗜 7-Zip · maximum compression")
     if dump_partitions:
         lines.append(f"🧩 {html.escape(', '.join(dump_partitions))}")
     lines.append("")
@@ -263,13 +269,23 @@ def _parse_inline_request(text: str):
     tokens = (text or "").strip().split()
     command = "gf"
     host = "gofile"
+    compress = False
     args = tokens
     if tokens and tokens[0].startswith("/"):
         first = tokens[0].split("@", 1)[0].lower()
         command = first[1:]
-        if command not in {"gf", "mirror", "px"}:
+        if command not in {
+            "gf",
+            "mirror",
+            "px",
+            "compress-gf",
+            "compress-px",
+            "compress_gf",
+            "compress_px",
+        }:
             return None, host, _inline_usage_text()
-        host = "pixeldrain" if command == "px" else "gofile"
+        compress = command.startswith("compress")
+        host = "pixeldrain" if command.endswith("px") else "gofile"
         args = tokens[1:]
 
     source = None
@@ -297,7 +313,12 @@ def _parse_inline_request(text: str):
             "<code>/gf &lt;link&gt; -dump boot,vendor</code>.",
         )
     return (
-        {"source": source, "host": host, "dump_partitions": dump_partitions},
+        {
+            "source": source,
+            "host": host,
+            "dump_partitions": dump_partitions,
+            "compress": compress,
+        },
         host,
         None,
     )
@@ -896,6 +917,7 @@ async def _submit_job(
     status_message: Optional[Message] = None,
     host: str = "gofile",
     dump_partitions: Sequence[str] = (),
+    compress: bool = False,
     inline_message_id: Optional[str] = None,
 ) -> None:
     settings: Settings = context.application.bot_data["settings"]
@@ -946,6 +968,7 @@ async def _submit_job(
         telegram_file_id=telegram_file_id,
         inline_message_id=inline_message_id,
         dump_partitions=dump_partitions,
+        compress=compress,
     )
     job.update(file_name=file_name, file_size=file_size)
     await _start_job(context, job, status_message)
@@ -994,21 +1017,30 @@ async def on_inline_query(
                 "source": parsed["source"],
                 "host": host,
                 "dump_partitions": list(parsed["dump_partitions"]),
+                "compress": bool(parsed.get("compress")),
                 "created_at": time.time(),
             }
             _write_inline_pending(settings, pending)
         title = (
-            "Mirror to Pixeldrain" if host == "pixeldrain" else "Mirror to Gofile"
+            ("Compress to Pixeldrain" if parsed.get("compress") else "Mirror to Pixeldrain")
+            if host == "pixeldrain"
+            else ("Compress to Gofile" if parsed.get("compress") else "Mirror to Gofile")
         )
         description = parsed["source"]
         if parsed["dump_partitions"]:
             description += " · dump " + ", ".join(parsed["dump_partitions"])
+        if parsed.get("compress"):
+            description += " · 7z"
         results = [
             _inline_result(
                 host,
                 title,
                 description,
-                _inline_pending_text(host, parsed["dump_partitions"]),
+                _inline_pending_text(
+                    host,
+                    parsed["dump_partitions"],
+                    bool(parsed.get("compress")),
+                ),
                 _inline_pending_keyboard(token),
             )
         ]
@@ -1076,6 +1108,7 @@ async def on_chosen_inline_result(
         ),
         inline_message_id=inline_message_id,
         dump_partitions=parsed["dump_partitions"],
+        compress=bool(parsed.get("compress")),
     )
     await _start_job(context, job, None)
 
@@ -1117,6 +1150,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/mirror &lt;link&gt; — same as /gf\n"
         "/px &lt;link&gt; — upload to Pixeldrain, or reply to a file with /px "
         "(requires a free Pixeldrain API key)\n"
+        "/compress-gf &lt;link&gt; — download, pack into a maximum-compression "
+        "7z archive, upload to Gofile, and report the archive SHA-256\n"
+        "/compress-px &lt;link&gt; — same, but upload the 7z to Pixeldrain\n"
         "/status — active jobs\n"
         "/cancel — cancel your jobs\n"
         "/id — show your Telegram ID\n"
@@ -1129,7 +1165,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/gf &lt;link&gt; -dump boot,vendor — download an OTA zip, fastboot ROM, "
         "or 7z/RAR archive, extract only those partition images from payload.bin "
         "or super.img, and upload them. Use <code>-dump</code> with spaces too: "
-        "<code>-dump boot vendor</code>.",
+        "<code>-dump boot vendor</code>.\n"
+        "/compress-gf &lt;link&gt; -dump boot,vendor — extract those images, "
+        "pack them into one maximum-compression 7z archive, upload it, and "
+        "report its SHA-256. <code>/compress-px</code> does the same for "
+        "Pixeldrain. Compression needs 7-Zip on the worker (set "
+        "<code>SEVEN_ZIP_PATH</code> if it is not on PATH).",
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
@@ -1160,6 +1201,7 @@ async def _cmd_link(
     *,
     command: str,
     host: str = "gofile",
+    compress: bool = False,
 ) -> None:
     settings: Settings = context.application.bot_data["settings"]
     if not _authorized(update, settings):
@@ -1207,6 +1249,7 @@ async def _cmd_link(
                 attachment,
                 host=host,
                 dump_partitions=dump_partitions,
+                compress=compress,
             )
             return
         if replied.text:
@@ -1227,6 +1270,7 @@ async def _cmd_link(
         source=source,
         host=host,
         dump_partitions=dump_partitions,
+        compress=compress,
     )
 
 
@@ -1240,6 +1284,41 @@ async def cmd_gf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_px(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _cmd_link(update, context, command="px", host="pixeldrain")
+
+
+async def cmd_compress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Route /compress-gf and /compress-px.
+
+    Telegram command names cannot contain hyphens, so some clients report only
+    ``/compress`` in the command entity. The full message text still contains
+    the suffix, so route on that.
+    """
+    message = update.effective_message
+    text = (getattr(message, "text", None) or "").strip()
+    token = text.split()[0].split("@", 1)[0].lower() if text.split() else ""
+    if token in {"/compress-px", "/compress_px"}:
+        await _cmd_link(
+            update,
+            context,
+            command="compress-px",
+            host="pixeldrain",
+            compress=True,
+        )
+        return
+    if token in {"/compress-gf", "/compress_gf"}:
+        await _cmd_link(
+            update,
+            context,
+            command="compress-gf",
+            compress=True,
+        )
+        return
+    if message is not None:
+        await message.reply_text(
+            "Usage: <code>/compress-gf &lt;link&gt; [-dump boot,vendor]</code>\n"
+            "<code>/compress-px &lt;link&gt; [-dump boot,vendor]</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1389,6 +1468,7 @@ async def _mirror_attachment(
     *,
     host: str = "gofile",
     dump_partitions: Sequence[str] = (),
+    compress: bool = False,
 ) -> None:
     """Submit a Telegram attachment, locally or to a GitHub Actions worker."""
     settings: Settings = context.application.bot_data["settings"]
@@ -1429,6 +1509,7 @@ async def _mirror_attachment(
                     file_size=document.file_size,
                     host=host,
                     dump_partitions=dump_partitions,
+                    compress=compress,
                 )
                 return
             status = await message.reply_text(
@@ -1449,6 +1530,7 @@ async def _mirror_attachment(
                 status_message=status,
                 host=host,
                 dump_partitions=dump_partitions,
+                compress=compress,
             )
             return
 
@@ -1484,6 +1566,7 @@ async def _mirror_attachment(
             file_size=size,
             host=host,
             dump_partitions=dump_partitions,
+            compress=compress,
         )
         return
 
@@ -1503,6 +1586,7 @@ async def _mirror_attachment(
         status_message=status,
         host=host,
         dump_partitions=dump_partitions,
+        compress=compress,
     )
 
 
@@ -1675,6 +1759,7 @@ async def _handle_inline_start(
     dump_partitions = tuple(
         str(part) for part in entry.get("dump_partitions") or () if part
     )
+    compress = bool(entry.get("compress"))
 
     await query.answer("Starting…")
     job = new_job(
@@ -1689,6 +1774,7 @@ async def _handle_inline_start(
         ),
         inline_message_id=inline_message_id,
         dump_partitions=dump_partitions,
+        compress=compress,
     )
     await _start_job(context, job, None)
 
@@ -1780,6 +1866,9 @@ def _register(app: Application, settings: Settings, manager: JobManager) -> None
     app.add_handler(CommandHandler("gf", cmd_gf))
     app.add_handler(CommandHandler("mirror", cmd_mirror))
     app.add_handler(CommandHandler("px", cmd_px))
+    app.add_handler(CommandHandler("compress", cmd_compress))
+    app.add_handler(CommandHandler("compress_gf", cmd_compress))
+    app.add_handler(CommandHandler("compress_px", cmd_compress))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("id", cmd_id))

@@ -4,6 +4,7 @@ import pytest
 
 import mirror.jobs as jobs_module
 from mirror.config import Settings
+from mirror.compressor import CompressionResult
 from mirror.downloader import DownloadResult
 from mirror.dumper import ExtractionResult
 from mirror.errors import DownloadError, FileTooLarge, NoFallbackResolutionError
@@ -207,3 +208,129 @@ def test_dump_pipeline_uploads_each_partition(tmp_path, monkeypatch):
     assert job.missing_partitions == ("system",)
     assert job.file_size == 300
     assert not source.exists()
+
+
+def test_compress_pipeline_uploads_one_archive(tmp_path, monkeypatch):
+    settings = Settings(telegram_token="test", download_dir=tmp_path)
+    manager = JobManager(settings)
+    source = tmp_path / "uploads" / "token" / "movie.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"movie-data")
+    archive = tmp_path / "movie.7z"
+    archive.write_bytes(b"7z-data")
+    seen = {}
+    uploaded = []
+
+    class FakeUploader:
+        name = "gofile"
+
+        def available(self):
+            return True, ""
+
+        def upload(self, path, progress, cancel):
+            uploaded.append(path.name)
+            return UploadResult(url="https://gofile.io/d/archive", host="Gofile")
+
+    def fake_compress(files, destination, **kwargs):
+        seen["files"] = [path.name for path in files]
+        seen["destination"] = destination.name
+        return CompressionResult(
+            path=archive,
+            size=archive.stat().st_size,
+            sha256="a" * 64,
+        )
+
+    monkeypatch.setattr(jobs_module, "get_uploader", lambda host, cfg: FakeUploader())
+    monkeypatch.setattr(jobs_module, "compress_to_7z", fake_compress)
+
+    job = new_job(
+        user_id=1,
+        chat_id=1,
+        source="movie.mkv",
+        host="gofile",
+        source_kind="telegram_file",
+        local_path=source,
+        compress=True,
+    )
+    manager._pipeline(job)
+
+    assert seen == {"files": ["movie.mkv"], "destination": "movie.7z"}
+    assert uploaded == ["movie.7z"]
+    assert job.file_name == "movie.7z"
+    assert job.file_size == 7
+    assert job.archive_sha256 == "a" * 64
+    assert job.result is not None
+    assert job.result.url == "https://gofile.io/d/archive"
+    assert job.result.file_name == "movie.7z"
+
+
+def test_compress_dump_pipeline_archives_all_partitions(tmp_path, monkeypatch):
+    settings = Settings(telegram_token="test", download_dir=tmp_path)
+    manager = JobManager(settings)
+    source = tmp_path / "uploads" / "token" / "ota.zip"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"PK\x03\x04")
+
+    boot = tmp_path / "dump" / "boot.img"
+    vendor = tmp_path / "dump" / "vendor_a.img"
+    boot.parent.mkdir()
+    boot.write_bytes(b"B" * 100)
+    vendor.write_bytes(b"V" * 200)
+    archive = tmp_path / "ota-boot-vendor.7z"
+    archive.write_bytes(b"7z-data")
+    seen = {}
+    uploaded = []
+
+    class FakeUploader:
+        name = "gofile"
+
+        def available(self):
+            return True, ""
+
+        def upload(self, path, progress, cancel):
+            uploaded.append(path.name)
+            return UploadResult(url="https://gofile.io/d/partitions", host="Gofile")
+
+    def fake_extract(root, partitions, output_dir, **kwargs):
+        return ExtractionResult(
+            files=[boot, vendor],
+            found=["boot", "vendor"],
+            missing=["system"],
+            sources=["super.img"],
+        )
+
+    def fake_compress(files, destination, **kwargs):
+        seen["files"] = [path.name for path in files]
+        seen["destination"] = destination.name
+        return CompressionResult(
+            path=archive,
+            size=archive.stat().st_size,
+            sha256="b" * 64,
+        )
+
+    monkeypatch.setattr(jobs_module, "get_uploader", lambda host, cfg: FakeUploader())
+    monkeypatch.setattr(jobs_module, "extract_partitions", fake_extract)
+    monkeypatch.setattr(jobs_module, "compress_to_7z", fake_compress)
+
+    job = new_job(
+        user_id=1,
+        chat_id=1,
+        source="ota.zip",
+        host="gofile",
+        source_kind="telegram_file",
+        local_path=source,
+        dump_partitions=("boot", "vendor"),
+        compress=True,
+    )
+    manager._pipeline(job)
+
+    assert seen == {
+        "files": ["boot.img", "vendor_a.img"],
+        "destination": "ota-boot-vendor.7z",
+    }
+    assert uploaded == ["ota-boot-vendor.7z"]
+    assert len(job.results) == 1
+    assert job.result is job.results[0]
+    assert job.file_name == "ota-boot-vendor.7z"
+    assert job.archive_sha256 == "b" * 64
+    assert job.missing_partitions == ("system",)

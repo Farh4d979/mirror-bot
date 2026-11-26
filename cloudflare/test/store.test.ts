@@ -39,6 +39,7 @@ const draft: NewJob = {
   sourceKind: "url",
   host: "gofile",
   dumpPartitions: [],
+  compress: false,
   fileId: null,
   fileName: null,
   fileSize: null,

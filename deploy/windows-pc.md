@@ -280,6 +280,11 @@ or `.rar` ROMs, check that 7-Zip is installed at
 `C:\Program Files\7-Zip\7z.exe` (or set `SEVEN_ZIP_PATH`). The bot adds
 `tools\` to PATH when started through `run-local.cmd`.
 
+**`/compress-gf` or `/compress-px` fails** — compression uses the same 7-Zip
+install as `-dump`. Check `C:\Program Files\7-Zip\7z.exe` or set
+`SEVEN_ZIP_PATH`. Building the archive needs free disk space roughly the size of
+the source, and the archive is uploaded only after its SHA-256 is computed.
+
 **Bot stops when the PC sleeps** — use `/handoff` first, disable sleep while
 plugged in, or accept the downtime. There is no automatic wake-up.
 

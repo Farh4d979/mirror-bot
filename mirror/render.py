@@ -13,6 +13,7 @@ STAGE_STYLES = {
     "resolving": ("🔎", "Resolving link"),
     "downloading": ("⬇️", "Downloading"),
     "extracting": ("🧩", "Extracting partitions"),
+    "compressing": ("🗜️", "Compressing"),
     "uploading": ("⬆️", "Uploading"),
     "remote": ("☁️", "GitHub Actions"),
     "done": ("✅", "Done"),
@@ -65,6 +66,8 @@ def render_job(job: Job) -> str:
     footer = [f"📦 {snap['host'].title()}"]
     if snap["file_size"]:
         footer.append(f"💾 {human_size(snap['file_size'])}")
+    if snap["compress"]:
+        footer.append("🗜 7z")
     if snap["status"] == "running" and snap["started_at"]:
         footer.append(f"⏱ {human_eta(max(0.0, time.time() - snap['started_at']))}")
     lines.append(" · ".join(footer))
@@ -84,6 +87,8 @@ def render_final(job: Job) -> str:
                 f"🗂 Requested: <code>{html.escape(requested)}</code>",
                 f"📦 {html.escape(results[0].host)} · 💾 {human_size(snap['file_size'])}",
             ]
+            if snap["archive_sha256"]:
+                lines.append("🗜 <b>7-Zip archive</b> · maximum compression")
             if duration:
                 lines.append(f"⏱ Took {duration}")
             lines.append(_launcher_html(snap))
@@ -101,20 +106,31 @@ def render_final(job: Job) -> str:
                         f'🔗 <a href="{url}">{url}</a>',
                     ]
                 )
+            if snap["archive_sha256"]:
+                lines.append(
+                    f"🔐 <b>SHA-256:</b> <code>{snap['archive_sha256']}</code>"
+                )
             return "\n".join(lines)
 
         result = snap["result"]
         lines = [
-            f"✅ <b>Job complete</b> · <code>{snap['id']}</code>",
+            f"✅ <b>{'Compressed & uploaded' if snap['archive_sha256'] else 'Job complete'}</b>"
+            f" · <code>{snap['id']}</code>",
             "",
             f"📄 {html.escape(snap['file_name'] or 'file')}",
             f"💾 {human_size(snap['file_size'])} · 📦 {html.escape(result.host)}",
         ]
+        if snap["archive_sha256"]:
+            lines.append("🗜 <b>7-Zip</b> · maximum compression")
         if duration:
             lines.append(f"⏱ Took {duration}")
         lines.append(_launcher_html(snap))
         if snap["extras"]:
             lines.append(f"<i>➕ {snap['extras']} extra file(s) were skipped.</i>")
+        if snap["archive_sha256"]:
+            lines.append(
+                f"🔐 <b>SHA-256:</b> <code>{snap['archive_sha256']}</code>"
+            )
         url = html.escape(result.url, quote=True)
         lines.extend(["", f'🔗 <a href="{url}">{url}</a>'])
         return "\n".join(lines)
