@@ -240,6 +240,24 @@ describe("cron monitor", () => {
     expect(store.updates).toHaveLength(1);
     expect(store.updates[0].patch.state).toBe("running");
     expect(store.removed).toHaveLength(0);
+    expect(tg.edits).toHaveLength(1);
+    expect(tg.edits[0]).toContain("GitHub Actions");
+    expect(tg.edits[0]).toContain("abc12345");
+  });
+
+  it("refreshes the queued card so the elapsed time stays live", async () => {
+    const store = new FakeStore([job({ state: "queued" })]);
+    const tg = new FakeTelegram();
+    const gh = new FakeGitHub({
+      123: { status: "queued", conclusion: null, htmlUrl: RUN_URL },
+    });
+
+    await refreshJobs(deps(store, tg, gh));
+
+    expect(store.updates).toHaveLength(1);
+    expect(store.updates[0].patch.state).toBe("queued");
+    expect(tg.edits).toHaveLength(1);
+    expect(tg.edits[0]).toContain("Waiting for a GitHub Actions runner");
   });
 
   it("fails a dispatch that never produced a run", async () => {

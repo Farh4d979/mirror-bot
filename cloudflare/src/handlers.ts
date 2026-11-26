@@ -207,7 +207,7 @@ async function deny(deps: HandlerDeps, message: TgMessage, userId: number): Prom
 }
 
 /** Edit a job card whether it lives in a chat or an inline message. */
-async function editJobCard(
+export async function editJobCard(
   deps: HandlerDeps,
   job: JobRecord,
   text: string,

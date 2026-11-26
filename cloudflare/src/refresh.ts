@@ -1,14 +1,16 @@
 import type { HandlerDeps } from "./handlers";
-import { deliverCancelled, deliverFailed } from "./handlers";
+import { deliverCancelled, deliverFailed, editJobCard } from "./handlers";
 import { RunNotFoundError } from "./github";
+import { cancelKeyboard, renderJob } from "./render";
 import { humanEta } from "./utils";
 
 const DISPATCH_STALE_SECONDS = 10 * 60;
 const RUN_MISSING_SECONDS = 12 * 60 * 60;
 
 /**
- * Poll active GitHub Actions runs. The worker normally posts its own final
- * card; this only fills the gap for cancelled runs and workers that died
+ * Poll active GitHub Actions runs. The worker normally posts its own progress
+ * and final card; this keeps queued cards alive, reports the switch to
+ * "running", and fills the gap for cancelled runs and workers that died
  * before they could report anything.
  */
 export async function refreshJobs(deps: HandlerDeps): Promise<void> {
@@ -72,9 +74,28 @@ export async function refreshJobs(deps: HandlerDeps): Promise<void> {
         : info.status === "in_progress"
           ? `GitHub Actions · ${humanEta(Math.max(0, now - job.startedAt))}`
           : "Waiting for a GitHub Actions runner…";
-    await deps.store.update(job.id, {
-      state: job.state === "cancelling" ? "cancelling" : info.status === "in_progress" ? "running" : "queued",
+    const previousState = job.state;
+    const nextState =
+      job.state === "cancelling"
+        ? "cancelling"
+        : info.status === "in_progress"
+          ? "running"
+          : "queued";
+    const updated = await deps.store.update(job.id, {
+      state: nextState,
       detail,
     });
+    if (updated && (nextState !== previousState || nextState === "queued")) {
+      try {
+        await editJobCard(
+          deps,
+          updated,
+          renderJob(updated, now),
+          cancelKeyboard(job.id),
+        );
+      } catch {
+        // The worker or the user may have already updated or removed the card.
+      }
+    }
   }
 }
