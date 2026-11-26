@@ -439,7 +439,7 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go, 7-Zip and galler
 | `/id` | Show your Telegram user/chat ID |
 | `/handoff` | PC runner only: stop the local bot and start the Actions fallback |
 
-Send a link or a magnet link directly. To mirror a file, GIF or `.torrent` that is already in the chat, reply to it with `/gf`, `/mirror`, or `/px`. Attachments sent without one of those commands are ignored. Cloud bots can download replied attachments up to 20 MB.
+Send a link or a magnet link directly. To mirror a file, GIF or `.torrent` that is already in the chat, reply to it with `/gf`, `/mirror`, `/px`, `/compress-gf`, or `/compress-px`. Attachments sent without one of those commands are ignored. Cloud bots can download replied attachments up to 20 MB.
 
 In groups, use commands such as `/gf@YourBot <link>`. Plain links are ignored there so the bot does not reply to every message. Private chats are owner-only; a group is enabled while at least one `ALLOWED_USER_IDS` member is in it.
 
@@ -475,7 +475,7 @@ Extraction needs free disk space for the requested images, not for the whole `su
 
 Add `-dump` to compress the extracted partitions instead of the original download. The requested images are packed into one archive named after the source and partitions, for example `ota-boot-vendor.7z`; the images are not uploaded separately.
 
-Compression needs [7-Zip](https://www.7-zip.org/) just like `-dump`. It runs in the shared job pipeline, so the PC fallback, GitHub Actions workers, and Docker image behave the same. The archive is created next to the download and is removed with the job's temporary directory. Password protection is not supported.
+Compression needs [7-Zip](https://www.7-zip.org/) just like `-dump`. It runs in the shared job pipeline, so the PC fallback, GitHub Actions workers, and Docker image behave the same. The archive is created inside the job's temporary directory and is removed with it. Password protection is not supported.
 
 ## Supported links
 
