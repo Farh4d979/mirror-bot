@@ -34,7 +34,7 @@ Telegram link / replied file
 - Telegram attachments — documents, photos, video, audio, voice notes, animations and stickers — are mirrored only when you reply to them with `/gf` or `/px`. Unsolicited media is ignored. Telegram's cloud Bot API limits bot downloads to 20 MB per attachment.
 - Gofile share links (`gofile.io/d/...`) resolve through Gofile's API using a temporary guest token. Folder links are supported; the bot downloads the largest file or every file in `MULTI_FILE_MODE=zip`.
 - Gofile guest uploads work with no account. An optional `GOFILE_TOKEN` uses your account. The bot does not reject a file by size on its own; Gofile's server enforces the plan limits.
-- Pixeldrain uploads (`/px`) use your Pixeldrain API key, with the free plan allowing 10 GB per file and Pro allowing 100 GB per file.
+- Pixeldrain uploads (`/px`, `/compress-px`) use your Pixeldrain API key, with the free plan allowing 10 GB per file and Pro allowing 100 GB per file.
 - Pixeldrain file links (`pixeldrain.com/u/...`) are downloaded through Pixeldrain's API. When `PIXELDRAIN_API_KEY` is set, the bot authenticates the download so a Pro/Prepaid account uses its own transfer quota instead of the shared free per-IP quota.
 - Progress bars, cancel buttons, per-user job limits, size limits and timeouts.
 - **Inline mode:** type `@YourBot /gf <link>` in any chat and the bot posts the progress card and final link right there. Inline mode accepts direct links only.
@@ -187,7 +187,7 @@ not count toward that limit.
 | `REMOTE_JOB_KEY` | `.env`; must match the GitHub Actions secret exactly |
 | `ALLOWED_USER_IDS` | `.env`; owner IDs for DMs and trusted groups |
 | `GOFILE_TOKEN` | Optional, from `.env` |
-| `PIXELDRAIN_API_KEY` | Optional, required for `/px` |
+| `PIXELDRAIN_API_KEY` | Optional, required for `/px` and `/compress-px` |
 
 Non-secret Worker settings live in `cloudflare\wrangler.toml`: `ACTIONS_REPO`,
 `ACTIONS_REF`, `REMOTE_WORKFLOW`, `MAX_FILE_SIZE`, `JOB_TIMEOUT`,
@@ -280,7 +280,7 @@ Actions busy indefinitely.
    | `ALLOWED_USER_IDS` | recommended | Comma-separated IDs allowed to DM the bot, e.g. `123456789,987654321`. Groups are enabled while one of these IDs is a member. Used by the fallback poller. |
    | `REMOTE_JOB_KEY` | yes for split mode | Fernet key shared with the PC. `scripts\configure-remote.ps1` generates it and uploads it for you. Never paste it into chat or a commit. |
    | `GOFILE_TOKEN` | optional | Uses your Gofile account for uploads and share-link downloads instead of guest tokens. The split worker receives this from the encrypted payload, so this secret is only needed by the fallback poller. |
-   | `PIXELDRAIN_API_KEY` | optional | Required for `/px` uploads. Also authenticates Pixeldrain downloads; a Pro/Prepaid key uses the account's own transfer quota. The split worker receives this from the encrypted payload. |
+   | `PIXELDRAIN_API_KEY` | optional | Required for `/px` and `/compress-px` uploads. Also authenticates Pixeldrain downloads; a Pro/Prepaid key uses the account's own transfer quota. The split worker receives this from the encrypted payload. |
 
    Optional repository **variables** (Settings → Secrets and variables → Actions → Variables): `MAX_FILE_SIZE` (`0`, unlimited), `MAX_CONCURRENT_JOBS` (`1`), `JOB_TIMEOUT` (`7200`), `MULTI_FILE_MODE` (`largest`), `YTDLP_FORMAT` (`bv*+ba/b`), `GOFILE_WT_SALT` (only needed if Gofile rotates its website-token salt). These apply to the fallback poller; the split worker receives the PC's current values inside the encrypted payload.
 
@@ -399,7 +399,7 @@ The image includes aria2, ffmpeg, megatools, payload-dumper-go, 7-Zip and galler
 | `TELEGRAM_BOT_TOKEN` | — | BotFather token (required) |
 | `ALLOWED_USER_IDS` | empty | Comma-separated Telegram user IDs allowed to use the bot in private chats. Groups work while at least one of these IDs is a member. Empty means anyone can DM the bot and use any group. |
 | `GOFILE_TOKEN` | empty | Optional Gofile account token. Empty = guest uploads. |
-| `PIXELDRAIN_API_KEY` | empty | Pixeldrain API key. Required for `/px`; also used to authenticate Pixeldrain downloads. |
+| `PIXELDRAIN_API_KEY` | empty | Pixeldrain API key. Required for `/px` and `/compress-px`; also used to authenticate Pixeldrain downloads. |
 | `MAX_FILE_SIZE` | `0` | Maximum downloaded file size; `0` = no bot-side limit |
 | `MAX_CONCURRENT_JOBS` | `2` | Parallel local/fallback jobs (`1` in the Actions workflow). Split-mode jobs each get their own runner. |
 | `JOB_TIMEOUT` | `7200` | Per-job timeout in seconds |
@@ -518,7 +518,7 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 
 **Pixeldrain rejects the API key (`authentication_failed`)** — create a fresh key at `https://pixeldrain.com/user/api_keys` and update the `PIXELDRAIN_API_KEY` secret. Keys are only used on `pixeldrain.com` hosts.
 
-**`/px` says `PIXELDRAIN_API_KEY` is not set** — `/gf` and `/mirror` still work with Gofile. Pixeldrain requires an account key for uploads, but the account is free and allows 10 GB per file: create one at `https://pixeldrain.com/user/api_keys` and add it to `.env` (and to the repository secret if you use the fallback poller). There is no upload size cap in the bot itself.
+**`/px` or `/compress-px` says `PIXELDRAIN_API_KEY` is not set** - `/gf` and `/mirror` still work with Gofile. Pixeldrain requires an account key for uploads, but the account is free and allows 10 GB per file: create one at `https://pixeldrain.com/user/api_keys` and add it to `.env` (and to the repository secret if you use the fallback poller). There is no upload size cap in the bot itself.
 
 **A Gofile share link fails** — the bot reads share links with a temporary guest token, so no account is needed. Password-protected folders are not supported. If Gofile changes its website-token salt, set `GOFILE_WT_SALT` to the current value from `https://gofile.io/js/wt.obf.js`; the default is `12af056dacea0b`.
 
@@ -553,7 +553,7 @@ Pixeldrain's free plan allows uploads up to 10 GB per file and roughly 6 GB of d
 - Never commit `.env` or tokens. The GitHub Actions secrets are the right place.
 - Only mirror content you have the right to copy. Respect the terms of service of the source site, Gofile, and Pixeldrain. yt-dlp, gallery-dl and megatools only access content the link already exposes; the bot does not bypass logins, paywalls, DRM or CAPTCHAs.
 - Gofile guest uploads create a new public folder per upload. Use `GOFILE_TOKEN` if you want uploads tied to your account.
-- The Pixeldrain API key is used for `/px` uploads and authenticated Pixeldrain downloads. It is sent only to `pixeldrain.com` hosts. The bot does not bypass Pixeldrain's limits, hotlink protection, or CAPTCHA; those require a paid Pixeldrain plan or the site's normal download flow.
+- The Pixeldrain API key is used for `/px` and `/compress-px` uploads and authenticated Pixeldrain downloads. It is sent only to `pixeldrain.com` hosts. The bot does not bypass Pixeldrain's limits, hotlink protection, or CAPTCHA; those require a paid Pixeldrain plan or the site's normal download flow.
 
 ## Tests
 
