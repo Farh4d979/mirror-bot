@@ -167,6 +167,49 @@ def to_sparse(raw: bytes) -> bytes:
     return header + chunk + padded
 
 
+def build_split_sparse_parts(
+    raw: bytes,
+    blocks_per_part: int,
+    *,
+    overlay: bool = False,
+    trailing_gap: bool = True,
+) -> list[bytes]:
+    """Build ``super.img.0``, ``super.img.1``, … sparse parts from a raw image."""
+    block = 4096
+    padded = raw + b"\0" * (-len(raw) % block)
+    total_blocks = len(padded) // block
+    parts: list[bytes] = []
+    for start in range(0, total_blocks, blocks_per_part):
+        end = min(total_blocks, start + blocks_per_part)
+        data = padded[start * block : end * block]
+        body = b""
+        chunks = 0
+        if overlay and start:
+            # Absolute-position layout: skip the blocks owned by other parts.
+            body += struct.pack("<HHII", 0xCAC3, 0, start, 12)
+            chunks += 1
+        body += struct.pack("<HHII", 0xCAC1, 0, end - start, 12 + len(data))
+        chunks += 1
+        body += data
+        if overlay and trailing_gap and end < total_blocks:
+            body += struct.pack("<HHII", 0xCAC3, 0, total_blocks - end, 12)
+            chunks += 1
+        header = struct.pack(
+            "<IHHHHIIII",
+            SPARSE_MAGIC,
+            1,
+            0,
+            28,
+            12,
+            block,
+            total_blocks,
+            chunks,
+            0,
+        )
+        parts.append(header + body)
+    return parts
+
+
 def test_extract_partition_from_super_image(tmp_path):
     data = b"V" * 4096
     raw = build_super_image(
@@ -221,6 +264,138 @@ def test_extract_partition_from_sparse_super_image(tmp_path):
     assert result.files[0].name == "system.img"
     assert result.files[0].read_bytes() == data
     assert result.missing == []
+
+
+def test_split_sparse_super_inside_zip_is_merged(tmp_path):
+    data = b"S" * 4096
+    raw = build_super_image([{"name": "system", "sectors": 8, "data": data}])
+    parts = build_split_sparse_parts(raw, 32)
+    assert len(parts) > 10
+
+    root = tmp_path / "download"
+    root.mkdir()
+    with zipfile.ZipFile(
+        root / "rom.zip", "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for index, part in enumerate(parts):
+            archive.writestr(f"images/super.img.{index}", part)
+
+    result = dumper.extract_partitions(
+        root,
+        ["system"],
+        tmp_path / "out",
+        settings=make_settings(tmp_path),
+        progress=lambda percent, detail: None,
+        cancel=CancelToken(),
+    )
+
+    assert result.files[0].name == "system.img"
+    assert result.files[0].read_bytes() == data
+    assert result.found == ["system"]
+    assert result.sources == ["super.img"]
+
+
+def test_split_sparse_super_with_dont_care_parts(tmp_path):
+    data = b"O" * 4096
+    raw = build_super_image([{"name": "system", "sectors": 8, "data": data}])
+    parts = build_split_sparse_parts(raw, 32, overlay=True)
+
+    root = tmp_path / "download"
+    root.mkdir()
+    with zipfile.ZipFile(
+        root / "rom.zip", "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for index, part in enumerate(parts):
+            archive.writestr(f"images/super.img.{index}", part)
+
+    result = dumper.extract_partitions(
+        root,
+        ["system"],
+        tmp_path / "out",
+        settings=make_settings(tmp_path),
+        progress=lambda percent, detail: None,
+        cancel=CancelToken(),
+    )
+
+    assert result.files[0].name == "system.img"
+    assert result.files[0].read_bytes() == data
+
+
+def test_split_sparse_super_without_trailing_gaps(tmp_path):
+    data = b"T" * 4096
+    raw = build_super_image([{"name": "system", "sectors": 8, "data": data}])
+    parts = build_split_sparse_parts(raw, 32, overlay=True, trailing_gap=False)
+
+    root = tmp_path / "download"
+    root.mkdir()
+    with zipfile.ZipFile(
+        root / "rom.zip", "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for index, part in enumerate(parts):
+            archive.writestr(f"images/super.img.{index}", part)
+
+    result = dumper.extract_partitions(
+        root,
+        ["system"],
+        tmp_path / "out",
+        settings=make_settings(tmp_path),
+        progress=lambda percent, detail: None,
+        cancel=CancelToken(),
+    )
+
+    assert result.files[0].name == "system.img"
+    assert result.files[0].read_bytes() == data
+
+
+def test_split_raw_super_parts_are_concatenated(tmp_path):
+    data = b"R" * 4096
+    raw = build_super_image([{"name": "system", "sectors": 8, "data": data}])
+
+    root = tmp_path / "download"
+    root.mkdir()
+    chunk = 131072
+    for index, start in enumerate(range(0, len(raw), chunk)):
+        (root / f"super.img.{index}").write_bytes(raw[start : start + chunk])
+
+    result = dumper.extract_partitions(
+        root,
+        ["system"],
+        tmp_path / "out",
+        settings=make_settings(tmp_path),
+        progress=lambda percent, detail: None,
+        cancel=CancelToken(),
+    )
+
+    assert result.files[0].name == "system.img"
+    assert result.files[0].read_bytes() == data
+
+
+def test_split_super_needs_every_part(tmp_path):
+    data = b"S" * 4096
+    raw = build_super_image([{"name": "system", "sectors": 8, "data": data}])
+    parts = build_split_sparse_parts(raw, 64)
+
+    root = tmp_path / "download"
+    root.mkdir()
+    with zipfile.ZipFile(
+        root / "rom.zip", "w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for index, part in enumerate(parts):
+            if index == 4:
+                continue
+            archive.writestr(f"images/super.img.{index}", part)
+
+    with pytest.raises(DumpError) as excinfo:
+        dumper.extract_partitions(
+            root,
+            ["system"],
+            tmp_path / "out",
+            settings=make_settings(tmp_path),
+            progress=lambda percent, detail: None,
+            cancel=CancelToken(),
+        )
+
+    assert "system" in str(excinfo.value)
 
 
 def test_super_metadata_reads_both_slots(tmp_path, monkeypatch):

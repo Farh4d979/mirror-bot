@@ -30,6 +30,7 @@ import tarfile
 import threading
 import time
 import zipfile
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Optional, Sequence
@@ -46,6 +47,7 @@ PARTITION_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _IMG_SUFFIX_RE = re.compile(r"\.img$", re.IGNORECASE)
 _SPLIT_RE = re.compile(r"[\s,]+")
 _DUMP_ARG_RE = re.compile(r"^--?dump(?:=(.*))?$", re.IGNORECASE)
+_SPLIT_PART_RE = re.compile(r"^(?P<stem>.+)\.img\.(?P<index>\d+)$", re.IGNORECASE)
 
 _ARCHIVE_SUFFIXES = (
     ".zip",
@@ -151,6 +153,35 @@ class _ArchiveEntry:
 class _ImageSource:
     path: Path
     entry: Optional[_ArchiveEntry] = None
+
+
+@dataclass(slots=True)
+class _SplitSuper:
+    """A super image stored as ``super.img.0``, ``super.img.1``, … parts."""
+
+    parts: list[_ImageSource]
+
+
+@dataclass(slots=True)
+class _SplitSegment:
+    """A byte range of the merged super image backed by one part."""
+
+    start: int
+    end: int
+    kind: str  # "raw" | "fill"
+    part: int
+    data_offset: int = 0
+    pattern: bytes = b"\0\0\0\0"
+
+
+@dataclass(slots=True)
+class _SparsePartInfo:
+    source: _ImageSource
+    block_size: int
+    total_blocks: int
+    covered_blocks: int
+    first_data_block: int
+    segments: list[_SplitSegment]
 
 
 @dataclass(slots=True)
@@ -304,13 +335,74 @@ def extract_partitions(
                     if temporary is not None:
                         temporary.unlink(missing_ok=True)
 
-    # 3. super.img with dynamic/logical partitions.
+    # 3. super.img with dynamic/logical partitions.  ROMs sometimes ship the
+    #    super image split into super.img.0, super.img.1, … parts; those are
+    #    merged virtually so no 8 GB temporary file is needed.
     super_inputs = _find_super_inputs(files, archives)
     super_error = ""
     if missing and super_inputs:
         for index, source in enumerate(super_inputs):
             if not missing:
                 break
+            if isinstance(source, _SplitSuper):
+                reader: Optional[_SplitSparseReader] = None
+                try:
+                    reader = _open_split_super(
+                        source.parts, cancel=cancel, progress=progress
+                    )
+                    super_parts = _read_super_metadata(
+                        reader, cancel=cancel, progress=progress
+                    )
+                except DumpError as exc:
+                    logger.warning("Could not read the split super image: %s", exc)
+                    super_error = str(exc)
+                    if reader is not None:
+                        reader.close()
+                    continue
+
+                try:
+                    available.extend(super_parts)
+                    matches: dict[str, str] = {}
+                    for request in missing:
+                        actual = _pick_partition(request, super_parts)
+                        if actual:
+                            matches[request] = actual
+                    if not matches:
+                        continue
+
+                    actuals = sorted(set(matches.values()))
+                    progress(
+                        None,
+                        f"Extracting {', '.join(actuals)} from the split super image…",
+                    )
+                    destinations = _extract_split_partitions(
+                        reader,
+                        super_parts,
+                        actuals,
+                        output_dir,
+                        cancel=cancel,
+                        progress=progress,
+                    )
+                    for request, actual in matches.items():
+                        destination = destinations.get(actual)
+                        if (
+                            destination is not None
+                            and destination.exists()
+                            and destination.stat().st_size > 0
+                        ):
+                            _append_unique(outputs, destination)
+                            _append_unique(found, request)
+                            _append_unique(sources, "super.img")
+                            if request in missing:
+                                missing.remove(request)
+                except DumpError as exc:
+                    logger.warning("Could not extract from the split super image: %s", exc)
+                    super_error = str(exc)
+                finally:
+                    if reader is not None:
+                        reader.close()
+                continue
+
             local_path = source.path
             temporary: Optional[Path] = None
             try:
@@ -727,15 +819,19 @@ def _find_payload_inputs(
 def _find_super_inputs(
     files: Sequence[Path],
     archives: dict[Path, list[_ArchiveEntry]],
-) -> list[_ImageSource]:
-    inputs: list[_ImageSource] = []
+) -> list[_ImageSource | _SplitSuper]:
+    inputs: list[_ImageSource | _SplitSuper] = []
     for path in files:
+        if _SPLIT_PART_RE.match(path.name):
+            continue
         if _looks_like_super(path):
             inputs.append(_ImageSource(path))
 
     for entries in archives.values():
         for entry in entries:
             name = entry.basename.lower()
+            if _SPLIT_PART_RE.match(entry.basename):
+                continue
             if name == "super.img" or (
                 name.startswith("super") and name.endswith(".img")
             ):
@@ -757,7 +853,48 @@ def _find_super_inputs(
         return (3, name)
 
     inputs.sort(key=priority)
+    # A plain super.img always wins over split parts, so try it first.
+    inputs.extend(_find_split_supers(files, archives))
     return inputs
+
+
+def _find_split_supers(
+    files: Sequence[Path],
+    archives: dict[Path, list[_ArchiveEntry]],
+) -> list[_SplitSuper]:
+    """Group ``super.img.0``, ``super.img.1``, … parts into split images."""
+    groups: dict[tuple[str, ...], dict[int, _ImageSource]] = {}
+
+    for path in files:
+        match = _SPLIT_PART_RE.match(path.name)
+        if not match or match.group("stem").lower() != "super":
+            continue
+        key = ("file", str(path.parent))
+        groups.setdefault(key, {})[int(match.group("index"))] = _ImageSource(path)
+
+    for archive, entries in archives.items():
+        for entry in entries:
+            match = _SPLIT_PART_RE.match(entry.basename)
+            if not match or match.group("stem").lower() != "super":
+                continue
+            parent = str(PurePosixPath(entry.name).parent)
+            key = ("archive", str(archive), parent)
+            groups.setdefault(key, {})[int(match.group("index"))] = _ImageSource(
+                archive, entry
+            )
+
+    split: list[_SplitSuper] = []
+    for parts in groups.values():
+        indexes = sorted(parts)
+        if len(indexes) < 2:
+            continue
+        if indexes != list(range(len(indexes))):
+            logger.warning(
+                "Ignoring incomplete split super image: parts %s", indexes
+            )
+            continue
+        split.append(_SplitSuper([parts[index] for index in indexes]))
+    return split
 
 
 def _looks_like_super(path: Path) -> bool:
@@ -1369,49 +1506,445 @@ def _open_image(path: Path) -> _RawReader | _SparseReader:
     return _RawReader(path)
 
 
+# ------------------------------------------------------------- split supers
+def _source_size(source: _ImageSource) -> int:
+    if source.entry is not None:
+        return source.entry.size
+    return source.path.stat().st_size
+
+
+@contextmanager
+def _source_stream(source: _ImageSource):
+    """Open a local file or an archive member as a binary stream."""
+    if source.entry is None:
+        with source.path.open("rb") as handle:
+            yield handle
+        return
+
+    entry = source.entry
+    if entry.kind == "zip":
+        with zipfile.ZipFile(entry.archive) as archive:
+            with archive.open(archive.getinfo(entry.name)) as handle:
+                yield handle
+        return
+    if entry.kind == "tar":
+        with tarfile.open(entry.archive, "r:*") as archive:
+            handle = archive.extractfile(archive.getmember(entry.name))
+            if handle is None:
+                raise DumpError(f"Could not read {entry.name} from the archive.")
+            with handle:
+                yield handle
+        return
+    raise DumpError(
+        "Split super images inside .7z/.rar archives are not supported yet. "
+        "Extract the archive first and retry."
+    )
+
+
+def _scan_sparse_part(
+    source: _ImageSource,
+    index: int,
+    *,
+    cancel: CancelToken,
+) -> _SparsePartInfo:
+    """Index the chunks of one sparse ``super.img.N`` part."""
+    with _source_stream(source) as stream:
+        header = stream.read(28)
+        if len(header) < 28:
+            raise DumpError("A split super image part is truncated.")
+        (
+            magic,
+            _major,
+            _minor,
+            file_header_size,
+            chunk_header_size,
+            block_size,
+            total_blocks,
+            total_chunks,
+            _checksum,
+        ) = struct.unpack("<IHHHHIIII", header)
+        if magic != _SPARSE_MAGIC:
+            raise DumpError(
+                "A split super image mixed sparse and raw parts; this layout "
+                "is not supported."
+            )
+        if (
+            block_size < _SECTOR_SIZE
+            or block_size % _SECTOR_SIZE
+            or file_header_size < 28
+            or chunk_header_size < 12
+        ):
+            raise DumpError("A split super image part has invalid geometry.")
+        if total_chunks <= 0 or total_chunks > 1_000_000:
+            raise DumpError("A split super image part has an invalid chunk count.")
+
+        segments: list[_SplitSegment] = []
+        position = file_header_size
+        block = 0
+        first_data_block: Optional[int] = None
+        for _chunk_index in range(total_chunks):
+            cancel.check()
+            stream.seek(position)
+            chunk_header = stream.read(12)
+            if len(chunk_header) < 12:
+                raise DumpError("A split super image part is truncated.")
+            chunk_type, _reserved, chunk_blocks, total_size = struct.unpack(
+                "<HHII", chunk_header
+            )
+            if chunk_blocks <= 0 or total_size < chunk_header_size:
+                raise DumpError("A split super image part has a corrupt chunk.")
+            data_start = position + chunk_header_size
+
+            if chunk_type == 0xCAC1:  # raw
+                if total_size < chunk_header_size + chunk_blocks * block_size:
+                    raise DumpError(
+                        "A split super image part has a truncated raw chunk."
+                    )
+                if first_data_block is None:
+                    first_data_block = block
+                segments.append(
+                    _SplitSegment(
+                        start=block * block_size,
+                        end=(block + chunk_blocks) * block_size,
+                        kind="raw",
+                        part=index,
+                        data_offset=data_start,
+                    )
+                )
+            elif chunk_type == 0xCAC2:  # fill
+                stream.seek(data_start)
+                pattern = stream.read(4)
+                if len(pattern) < 4:
+                    raise DumpError("A split super image part is truncated.")
+                # Zero fills are gaps; skipping them lets later parts win in
+                # overlay-style split images.
+                if pattern != b"\0\0\0\0":
+                    if first_data_block is None:
+                        first_data_block = block
+                    segments.append(
+                        _SplitSegment(
+                            start=block * block_size,
+                            end=(block + chunk_blocks) * block_size,
+                            kind="fill",
+                            part=index,
+                            pattern=pattern,
+                        )
+                    )
+            elif chunk_type in (0xCAC3, 0xCAC4):  # don't care / crc32
+                pass
+            else:
+                raise DumpError(
+                    "A split super image part uses an unknown chunk type "
+                    f"0x{chunk_type:x}."
+                )
+
+            block += chunk_blocks
+            position += total_size
+
+        if block > total_blocks:
+            raise DumpError(
+                "A split super image part contains more blocks than its header "
+                "declares."
+            )
+        return _SparsePartInfo(
+            source=source,
+            block_size=block_size,
+            total_blocks=total_blocks,
+            covered_blocks=block,
+            first_data_block=(
+                total_blocks if first_data_block is None else first_data_block
+            ),
+            segments=segments,
+        )
+
+
+def _merge_split_segments(
+    per_part: Sequence[list[_SplitSegment]],
+) -> list[_SplitSegment]:
+    """Flatten part segments, letting later parts overwrite earlier ones."""
+    owned: list[_SplitSegment] = []
+    # Sequential flashing writes the parts in order, so the last part wins.
+    for segments in reversed(per_part):
+        for segment in sorted(segments, key=lambda item: item.start):
+            pieces = [segment]
+            for existing in owned:
+                if not pieces:
+                    break
+                if existing.end <= segment.start or existing.start >= segment.end:
+                    continue
+                next_pieces: list[_SplitSegment] = []
+                for piece in pieces:
+                    if existing.end <= piece.start or existing.start >= piece.end:
+                        next_pieces.append(piece)
+                        continue
+                    if piece.start < existing.start:
+                        next_pieces.append(
+                            _SplitSegment(
+                                start=piece.start,
+                                end=existing.start,
+                                kind=piece.kind,
+                                part=piece.part,
+                                data_offset=piece.data_offset,
+                                pattern=piece.pattern,
+                            )
+                        )
+                    if piece.end > existing.end:
+                        next_pieces.append(
+                            _SplitSegment(
+                                start=existing.end,
+                                end=piece.end,
+                                kind=piece.kind,
+                                part=piece.part,
+                                data_offset=piece.data_offset
+                                + (existing.end - piece.start),
+                                pattern=piece.pattern,
+                            )
+                        )
+                pieces = next_pieces
+            for piece in pieces:
+                bisect.insort(owned, piece, key=lambda item: item.start)
+    return owned
+
+
+class _SplitSparseReader:
+    """Present split sparse/raw parts as one random-access image."""
+
+    def __init__(
+        self,
+        parts: Sequence[_ImageSource],
+        segments: Sequence[_SplitSegment],
+        size: int,
+    ) -> None:
+        self.parts = list(parts)
+        self.segments = list(segments)
+        self.starts = [segment.start for segment in self.segments]
+        self.size = size
+        self._streams: dict[int, tuple[ExitStack, object]] = {}
+
+    def read_at(self, offset: int, size: int) -> bytes:
+        if offset < 0 or size <= 0:
+            return b""
+        end = min(self.size, offset + size)
+        if end <= offset:
+            return b""
+
+        output = bytearray()
+        position = offset
+        index = max(0, bisect.bisect_right(self.starts, position) - 1)
+        while index < len(self.segments) and position < end:
+            segment = self.segments[index]
+            index += 1
+            if segment.end <= position:
+                continue
+            if segment.start > position:
+                gap_end = min(segment.start, end)
+                output.extend(b"\0" * (gap_end - position))
+                position = gap_end
+                if position >= end:
+                    break
+                if segment.start > position:
+                    continue
+
+            start = max(segment.start, position)
+            stop = min(segment.end, end)
+            length = stop - start
+            if length <= 0:
+                continue
+            if segment.kind == "fill":
+                repeat = (length + 3) // 4
+                output.extend((segment.pattern * repeat)[:length])
+            else:
+                stream = self._stream(segment.part)
+                stream.seek(segment.data_offset + (start - segment.start))
+                data = stream.read(length)
+                if len(data) < length:
+                    raise DumpError("A split super image part is truncated.")
+                output.extend(data)
+            position = stop
+
+        if position < end:
+            output.extend(b"\0" * (end - position))
+        return bytes(output)
+
+    def _stream(self, index: int):
+        cached = self._streams.get(index)
+        if cached is not None:
+            return cached[1]
+        stack = ExitStack()
+        stream = stack.enter_context(_source_stream(self.parts[index]))
+        self._streams[index] = (stack, stream)
+        return stream
+
+    def close(self) -> None:
+        for stack, _stream in self._streams.values():
+            stack.close()
+        self._streams.clear()
+
+
+def _open_split_super(
+    parts: Sequence[_ImageSource],
+    *,
+    cancel: CancelToken,
+    progress: ProgressCB,
+) -> _SplitSparseReader:
+    if len(parts) < 2:
+        raise DumpError("A split super image needs at least two parts.")
+
+    with _source_stream(parts[0]) as stream:
+        magic = stream.read(4)
+
+    if magic != struct.pack("<I", _SPARSE_MAGIC):
+        # Raw super images split with ``split``: just concatenate them.
+        segments: list[_SplitSegment] = []
+        cursor = 0
+        for index, source in enumerate(parts):
+            cancel.check()
+            size = _source_size(source)
+            if size <= 0:
+                raise DumpError("A split super image part is empty.")
+            segments.append(
+                _SplitSegment(
+                    start=cursor,
+                    end=cursor + size,
+                    kind="raw",
+                    part=index,
+                )
+            )
+            cursor += size
+            progress(
+                None,
+                f"Reading split super image part {index + 1}/{len(parts)}…",
+            )
+        return _SplitSparseReader(parts, segments, cursor)
+
+    infos: list[_SparsePartInfo] = []
+    for index, source in enumerate(parts):
+        name = (
+            source.entry.basename
+            if source.entry is not None
+            else source.path.name
+        )
+        progress(
+            None,
+            f"Reading split super image part {index + 1}/{len(parts)} ({name})…",
+        )
+        infos.append(_scan_sparse_part(source, index, cancel=cancel))
+
+    block_size = infos[0].block_size
+    for info in infos[1:]:
+        if info.block_size != block_size:
+            raise DumpError("Split super image parts use different block sizes.")
+
+    if len({info.total_blocks for info in infos}) == 1:
+        total_blocks = infos[0].total_blocks
+        coverages = [info.covered_blocks for info in infos]
+        absolute = all(covered == total_blocks for covered in coverages)
+        if not absolute and sum(coverages) != total_blocks:
+            # Overlay parts may omit the trailing gap chunk.  A leading gap
+            # in a later part then skips the region owned by earlier parts,
+            # which is the fingerprint of absolute chunk positions.
+            absolute = any(info.first_data_block > 0 for info in infos[1:])
+        if absolute:
+            offsets = [0] * len(infos)
+        else:
+            # Parts are sequential slices of one sparse stream, each with the
+            # global block count copied into its header.
+            cursor = 0
+            offsets = []
+            for covered in coverages:
+                offsets.append(cursor)
+                cursor += covered
+            if cursor > total_blocks:
+                raise DumpError(
+                    "Split super image parts contain more blocks than the "
+                    f"image declares ({cursor} > {total_blocks})."
+                )
+    else:
+        # Each part is its own sparse segment.
+        cursor = 0
+        offsets = []
+        for info in infos:
+            offsets.append(cursor)
+            cursor += info.total_blocks
+        total_blocks = cursor
+
+    per_part: list[list[_SplitSegment]] = []
+    for info, offset in zip(infos, offsets):
+        shift = offset * block_size
+        per_part.append(
+            [
+                _SplitSegment(
+                    start=segment.start + shift,
+                    end=segment.end + shift,
+                    kind=segment.kind,
+                    part=segment.part,
+                    data_offset=segment.data_offset,
+                    pattern=segment.pattern,
+                )
+                for segment in info.segments
+            ]
+        )
+
+    size = total_blocks * block_size
+    if size <= 0 or size > 64 * 1024**3:
+        raise DumpError("The split super image has an invalid size.")
+    return _SplitSparseReader(parts, _merge_split_segments(per_part), size)
+
+
 def _read_super_partitions(
     path: Path,
     *,
     cancel: CancelToken,
     progress: ProgressCB,
 ) -> dict[str, _Partition]:
-    progress(None, "Reading super.img metadata…")
     reader = _open_image(path)
     try:
-        geometry = _read_geometry(reader)
-        metadata_max_size, slot_count = geometry
-        base = _RESERVED_BYTES + _GEOMETRY_SIZE * 2
-        last_error: Optional[Exception] = None
-        partitions: dict[str, _Partition] = {}
-
-        # Metadata slot 0 describes the _a partitions and slot 1 the _b
-        # partitions, so both slots have to be read to support "-dump vendor_b".
-        for slot in range(slot_count):
-            offsets = [
-                base + metadata_max_size * slot,
-                base + metadata_max_size * slot_count + metadata_max_size * slot,
-            ]
-            for offset in offsets:
-                cancel.check()
-                try:
-                    parsed = _parse_metadata(reader, offset, slot)
-                except DumpError as exc:
-                    last_error = exc
-                    continue
-                for name, partition in parsed.items():
-                    partitions.setdefault(name, partition)
-                break
-
-        if partitions:
-            return partitions
-        if last_error:
-            raise DumpError(f"super.img metadata is invalid: {last_error}")
-        raise DumpError("super.img has no logical partition metadata.")
+        return _read_super_metadata(reader, cancel=cancel, progress=progress)
     finally:
         reader.close()
 
 
-def _read_geometry(reader: _RawReader | _SparseReader) -> tuple[int, int]:
+def _read_super_metadata(
+    reader: _RawReader | _SparseReader | _SplitSparseReader,
+    *,
+    cancel: CancelToken,
+    progress: ProgressCB,
+) -> dict[str, _Partition]:
+    progress(None, "Reading super.img metadata…")
+    geometry = _read_geometry(reader)
+    metadata_max_size, slot_count = geometry
+    base = _RESERVED_BYTES + _GEOMETRY_SIZE * 2
+    last_error: Optional[Exception] = None
+    partitions: dict[str, _Partition] = {}
+
+    # Metadata slot 0 describes the _a partitions and slot 1 the _b
+    # partitions, so both slots have to be read to support "-dump vendor_b".
+    for slot in range(slot_count):
+        offsets = [
+            base + metadata_max_size * slot,
+            base + metadata_max_size * slot_count + metadata_max_size * slot,
+        ]
+        for offset in offsets:
+            cancel.check()
+            try:
+                parsed = _parse_metadata(reader, offset, slot)
+            except DumpError as exc:
+                last_error = exc
+                continue
+            for name, partition in parsed.items():
+                partitions.setdefault(name, partition)
+            break
+
+    if partitions:
+        return partitions
+    if last_error:
+        raise DumpError(f"super.img metadata is invalid: {last_error}")
+    raise DumpError("super.img has no logical partition metadata.")
+
+
+def _read_geometry(
+    reader: _RawReader | _SparseReader | _SplitSparseReader,
+) -> tuple[int, int]:
     for offset in (_RESERVED_BYTES, _RESERVED_BYTES + _GEOMETRY_SIZE):
         data = reader.read_at(offset, 52)
         if len(data) < 52:
@@ -1435,7 +1968,7 @@ def _read_geometry(reader: _RawReader | _SparseReader) -> tuple[int, int]:
 
 
 def _parse_metadata(
-    reader: _RawReader | _SparseReader, offset: int, slot: int
+    reader: _RawReader | _SparseReader | _SplitSparseReader, offset: int, slot: int
 ) -> dict[str, _Partition]:
     header = reader.read_at(offset, 128)
     if len(header) < 128:
@@ -1527,6 +2060,28 @@ def _extract_super_partition(
     progress: ProgressCB,
 ) -> None:
     reader = _open_image(path)
+    try:
+        _extract_super_partition_from(
+            reader,
+            partition,
+            destination,
+            label=label,
+            cancel=cancel,
+            progress=progress,
+        )
+    finally:
+        reader.close()
+
+
+def _extract_super_partition_from(
+    reader: _RawReader | _SparseReader | _SplitSparseReader,
+    partition: _Partition,
+    destination: Path,
+    *,
+    label: str,
+    cancel: CancelToken,
+    progress: ProgressCB,
+) -> None:
     total = partition.size
     done = 0
     partial = destination.with_suffix(destination.suffix + ".part")
@@ -1575,8 +2130,99 @@ def _extract_super_partition(
     except Exception:
         partial.unlink(missing_ok=True)
         raise
-    finally:
-        reader.close()
+
+
+def _extract_split_partitions(
+    reader: _SplitSparseReader,
+    partitions: dict[str, _Partition],
+    actuals: Sequence[str],
+    output_dir: Path,
+    *,
+    cancel: CancelToken,
+    progress: ProgressCB,
+) -> dict[str, Path]:
+    """Extract several partitions from a merged split super in one pass.
+
+    Ranges are visited in physical order so each part is decompressed from
+    start to end only once, which matters for 7 GB zip members.
+    """
+    total = sum(partitions[name].size for name in actuals)
+    done = 0
+    ranges: list[tuple[int, int, str, int]] = []
+    handles: dict[str, tuple[object, Path, Path]] = {}
+    try:
+        for actual in actuals:
+            partition = partitions[actual]
+            destination = output_dir / f"{actual}.img"
+            partial = destination.with_suffix(destination.suffix + ".part")
+            handle = partial.open("w+b")
+            # Truncating creates a sparse file; zero extents stay as holes.
+            handle.truncate(partition.size)
+            handles[actual] = (handle, partial, destination)
+            out_offset = 0
+            for extent in partition.extents:
+                length = extent.sectors * _SECTOR_SIZE
+                if extent.target_type == 1:  # dm-zero
+                    done += length
+                elif extent.target_type != 0:
+                    raise DumpError(
+                        f"{partition.name} uses an unsupported extent type."
+                    )
+                elif extent.target_source != 0:
+                    raise DumpError(
+                        f"{partition.name} lives on another block device and cannot "
+                        "be extracted from this super image."
+                    )
+                else:
+                    ranges.append(
+                        (extent.target_data * _SECTOR_SIZE, length, actual, out_offset)
+                    )
+                out_offset += length
+
+        ranges.sort(key=lambda item: item[0])
+        for offset, length, actual, out_offset in ranges:
+            cancel.check()
+            handle = handles[actual][0]
+            position = offset
+            remaining = length
+            while remaining:
+                cancel.check()
+                chunk = min(_COPY_CHUNK, remaining)
+                data = reader.read_at(position, chunk)
+                if not data:
+                    raise DumpError(
+                        f"{actual} points outside the split super image. "
+                        "The download may be incomplete."
+                    )
+                handle.seek(out_offset)
+                handle.write(data)
+                position += len(data)
+                out_offset += len(data)
+                remaining -= len(data)
+                done += len(data)
+                percent = done / total * 100 if total else None
+                progress(
+                    percent,
+                    f"Extracting {actual}.img · {format_progress(done, total)}",
+                )
+
+        outputs: dict[str, Path] = {}
+        for actual, (handle, partial, destination) in handles.items():
+            handle.flush()
+            handle.close()
+            if partial.stat().st_size == 0:
+                raise DumpError(f"{actual} is empty.")
+            partial.replace(destination)
+            outputs[actual] = destination
+        return outputs
+    except Exception:
+        for handle, partial, _destination in handles.values():
+            try:
+                handle.close()
+            except Exception:
+                pass
+            partial.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------- errors

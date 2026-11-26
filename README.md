@@ -460,6 +460,7 @@ Supported sources inside the download:
 | OTA `.zip` containing `payload.bin` (full OTA, or a partial payload that needs no source images) | `payload-dumper-go` extracts only the selected partitions |
 | Raw `payload.bin` | Same as above |
 | Fastboot ROM `.zip` / `.tar` / `.tar.gz` / `.tgz` / `.7z` / `.rar` containing `super.img` | The LP metadata is parsed and only the requested extents are copied (sparse `super.img` works too) |
+| ROM with `super.img` split into `super.img.0`, `super.img.1`, … (ZIP/TAR or plain files) | The parts are merged on the fly (sparse or raw), without writing the full `super.img` to disk |
 | Raw or already-extracted `boot.img`, `vendor.img`, … | Used directly |
 | ZIP/TAR/7z/RAR containing raw partition images | Only the matching `.img` members are extracted; 7z/RAR members are streamed straight to disk |
 
