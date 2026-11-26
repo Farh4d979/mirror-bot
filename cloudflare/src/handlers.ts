@@ -375,8 +375,9 @@ type InlineParse =
     }
   | {
       ok: false;
-      reason: "usage" | "dump_usage" | "invalid";
+      reason: "usage" | "dump_usage" | "invalid" | "too_long";
       host: InlineHost;
+      command?: string;
       message?: string;
     };
 
@@ -422,6 +423,12 @@ function parseInlineQuery(text: string): InlineParse {
 
   const remaining = args.filter((_, index) => index !== sourceIndex);
   const { values, requested } = parseDumpArgs(remaining);
+  if (requested && String(text || "").length >= 256) {
+    // Telegram silently truncates inline queries at 256 characters. A long
+    // signed URL leaves almost no room, so partitions after the cut would be
+    // dropped without warning. Refuse to guess and point at chat mode.
+    return { ok: false, reason: "too_long", host, command };
+  }
   let dumpPartitions: string[];
   try {
     dumpPartitions = normalizePartitions(values);
@@ -466,6 +473,15 @@ function inlineErrorText(parsed: Extract<InlineParse, { ok: false }>): string {
     return htmlEscape(parsed.message || "Invalid dump partition.");
   }
   if (parsed.reason === "dump_usage") return renderDumpUsage("gf");
+  if (parsed.reason === "too_long") {
+    const command = parsed.command || "gf";
+    return (
+      "Telegram limits inline queries to 256 characters, so the partition " +
+      "list was cut off. Send the command as a normal message in the private " +
+      `chat instead, e.g. <code>/${htmlEscape(command)} &lt;link&gt; ` +
+      "-dump system,system_ext,product,mi_ext</code>."
+    );
+  }
   return renderInlineUsage();
 }
 
@@ -494,13 +510,16 @@ async function handleInlineQuery(
 
   const parsed = parseInlineQuery(query.query);
   if (!parsed.ok) {
+    const tooLong = parsed.reason === "too_long";
     await deps.tg.answerInlineQuery(
       query.id,
       [
         inlineResult(
-          "usage",
-          "Usage: /gf <link>",
-          "Example: /gf https://example.com/file.zip",
+          tooLong ? "too_long" : "usage",
+          tooLong ? "Inline query too long" : "Usage: /gf <link>",
+          tooLong
+            ? "Send the command as a normal message in the private chat"
+            : "Example: /gf https://example.com/file.zip",
           inlineErrorText(parsed),
         ),
       ],

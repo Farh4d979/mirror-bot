@@ -722,6 +722,28 @@ describe("inline mode", () => {
     });
   });
 
+  it("rejects inline queries truncated at Telegram's 256-character limit", async () => {
+    const { deps, store, tg, gh } = makeDeps();
+    const url = `https://example.com/${"a".repeat(220)}.zip`;
+    const query = `/compress-gf ${url} -dump system,system_ext,product,mi_ext`;
+    expect(query.length).toBeGreaterThanOrEqual(256);
+
+    await handleUpdate(deps, {
+      update_id: 35,
+      inline_query: inlineQuery({ query }),
+    });
+
+    expect(gh.dispatched).toHaveLength(0);
+    expect(store.pending.size).toBe(0);
+    const result = tg.inlineAnswers[0].results[0] as {
+      title: string;
+      input_message_content: { message_text: string };
+    };
+    expect(result.title).toBe("Inline query too long");
+    expect(result.input_message_content.message_text).toContain("256 characters");
+    expect(result.input_message_content.message_text).toContain("normal message");
+  });
+
   it("restores the compress flag from the inline Start button", async () => {
     const { deps, gh } = makeDeps();
     await handleUpdate(deps, {

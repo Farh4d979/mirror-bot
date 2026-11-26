@@ -122,7 +122,10 @@ export function renderStart(botUsername = ""): string {
     + "<b>Inline mode</b>\n"
     + `Type <code>${htmlEscape(inlineHandle)} /gf &lt;link&gt;</code> in any chat. `
     + "The bot posts an inline card there and updates it with progress and the "
-    + "final link. Inline mode only accepts direct links, not replied files.\n\n"
+    + "final link. Inline mode only accepts direct links, not replied files. "
+    + "Telegram caps inline queries at 256 characters; for long links with "
+    + "<code>-dump</code>, send the command as a normal message in the private "
+    + "chat.\n\n"
     + "To mirror a file or GIF that is already in the chat, reply to it with "
     + "<code>/gf</code> or <code>/px</code>. Other attachments are ignored. "
     + "Telegram bots can download replied attachments up to 20 MB; send a link "

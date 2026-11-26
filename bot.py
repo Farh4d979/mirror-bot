@@ -1135,7 +1135,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Type <code>@{context.bot.username} /gf &lt;link&gt;</code> in any "
             "chat. The bot posts an inline card there and updates it with "
             "progress and the final link. Inline mode only accepts direct "
-            "links.\n\n"
+            "links. Telegram caps inline queries at 256 characters; for long "
+            "links with <code>-dump</code>, send the command as a normal "
+            "message in the private chat.\n\n"
             if context.bot.username
             else ""
         )
