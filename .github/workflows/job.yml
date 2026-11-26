@@ -54,7 +54,7 @@ jobs:
       - name: Install system tools
         timeout-minutes: 6
         run: |
-          APT_OPTS="-o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1"
+          APT_OPTS="-o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=1 -o DPkg::Lock::Timeout=60"
           timeout 90 sudo apt-get update -qq $APT_OPTS \
             || echo "apt-get update did not finish; using the runner's package lists"
           sudo apt-get install -y -qq $APT_OPTS aria2 ffmpeg megatools xz-utils 7zip 7zip-rar \
