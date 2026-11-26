@@ -449,6 +449,8 @@ Type `@YourBot /gf <link>` in any chat, including a private chat with someone el
 
 Inline mode is authorized by the Telegram account that types the query, not by the target chat, because Telegram does not reveal the target chat to the bot. When `ALLOWED_USER_IDS` is set, only those users can use it. Inline cards cannot be deleted by bots, so the completion card is edited in place instead of the delete-then-send used in normal chats. Reply-to-file is not available inline; send a direct link instead.
 
+Telegram caps inline queries at 256 characters. Long signed links leave little room for a partition list, so a `-dump` query that hits the cap is rejected instead of silently dropping partitions. Send that command as a normal message in the private chat (or reply to the link) to use the full 4096-character message limit.
+
 ### Android partition dumps (`-dump`)
 
 `/gf <link> -dump boot,vendor` works like a normal mirror job, but instead of uploading the downloaded archive it looks inside it for Android partition images and uploads only the requested ones. The syntax also accepts spaces and `.img` suffixes: `-dump boot vendor`, `-dump boot.img,vendor.img`.
