@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 
 import mirror.jobs as jobs_module
-from mirror.config import Settings
 from mirror.compressor import CompressionResult
+from mirror.config import Settings
 from mirror.downloader import DownloadResult
 from mirror.dumper import ExtractionResult
 from mirror.errors import DownloadError, FileTooLarge, NoFallbackResolutionError

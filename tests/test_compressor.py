@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-import mirror.compressor as compressor
+from mirror import compressor
 from mirror.compressor import (
     build_7z_command,
     build_archive_name,

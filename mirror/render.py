@@ -113,9 +113,11 @@ def render_final(job: Job) -> str:
             return "\n".join(lines)
 
         result = snap["result"]
+        headline = (
+            "Compressed & uploaded" if snap["archive_sha256"] else "Job complete"
+        )
         lines = [
-            f"✅ <b>{'Compressed & uploaded' if snap['archive_sha256'] else 'Job complete'}</b>"
-            f" · <code>{snap['id']}</code>",
+            f"✅ <b>{headline}</b> · <code>{snap['id']}</code>",
             "",
             f"📄 {html.escape(snap['file_name'] or 'file')}",
             f"💾 {human_size(snap['file_size'])} · 📦 {html.escape(result.host)}",
